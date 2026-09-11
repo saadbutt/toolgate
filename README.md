@@ -105,7 +105,21 @@ internal/untrusted  taint marking for anything a tool returns
 internal/exec       idempotent execution and reconciliation
 internal/gate       the one path a call takes
 internal/billing    a fake billing system, so there is something real to refuse
+typescript/         the confirmation core, ported, with cross-language hash parity
 ```
+
+## TypeScript
+
+Most AI tooling is TypeScript, so the piece most worth having in that stack is ported in [`typescript/`](typescript/): frozen-argument confirmation, single-use tokens, canonical hashing.
+
+```
+cd typescript
+node --experimental-strip-types --test test/*.test.ts
+```
+
+Node 22.6 or newer, no build step, no dependencies.
+
+Both implementations hash identical arguments to identical values, and both test suites assert the same fixtures, so neither can drift without a test failing. Making that true required matching one non-obvious behaviour: Go's `encoding/json` escapes `<`, `>` and `&` by default and `JSON.stringify` does not, so a naive port agrees on everything until an argument contains an ampersand.
 
 ## Tests
 

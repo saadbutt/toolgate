@@ -31,3 +31,19 @@ jobs:
 
       - name: build for arm64
         run: GOOS=linux GOARCH=arm64 go build ./cmd/...
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: test
+        working-directory: typescript
+        run: node --experimental-strip-types --test test/*.test.ts
+
+      - name: demo runs clean
+        working-directory: typescript
+        run: node --experimental-strip-types src/demo.ts
