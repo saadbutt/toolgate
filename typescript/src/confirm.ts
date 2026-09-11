@@ -65,7 +65,7 @@ export interface StoreOptions {
    */
   ttlMs?: number;
   /** Injectable clock, for tests. */
-  now?: () => Date;
+  now?: (() => Date) | undefined;
 }
 
 export class IntentStore {

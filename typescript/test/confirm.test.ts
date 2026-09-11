@@ -107,8 +107,8 @@ describe("confirmation", () => {
   test("reading an intent does not reveal the token", () => {
     const store = newStore();
     const { intent } = store.create("t", refund(), "", "a", "saad");
-    const view = store.pending(intent.id) as Record<string, unknown>;
-    assert.equal(view.token, undefined);
+    const view = store.pending(intent.id);
+    assert.equal("token" in view, false);
     assert.equal(JSON.stringify(view).includes("token"), false);
   });
 

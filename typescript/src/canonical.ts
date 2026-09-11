@@ -35,7 +35,13 @@ export type Args = Record<string, ArgValue>;
  */
 export function canonicalize(args: Args): string {
   const keys = Object.keys(args).sort();
-  const parts = keys.map((k) => `${encodeString(k)}:${encodeValue(args[k], k)}`);
+  const parts = keys.map((k) => {
+    const value = args[k];
+    if (value === undefined) {
+      throw new TypeError(`canonicalize: ${k} has unsupported type undefined`);
+    }
+    return `${encodeString(k)}:${encodeValue(value, k)}`;
+  });
   return `{${parts.join(",")}}`;
 }
 
@@ -74,7 +80,7 @@ const htmlEscapes: Record<string, string> = {
 };
 
 function encodeString(s: string): string {
-  return JSON.stringify(s).replace(/[<>&]/g, (c) => htmlEscapes[c]);
+  return JSON.stringify(s).replace(/[<>&]/g, (c) => htmlEscapes[c] ?? c);
 }
 
 /** Returns the hex sha256 of the canonical encoding of args. */

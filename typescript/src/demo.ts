@@ -57,7 +57,11 @@ try {
 console.log(`\n${line}\nSaad approves\n${line}`);
 
 const { tool, args } = store.confirm(intent.id, token, "saad");
-console.log(`  ${handlers[tool](args)}`);
+const handler = handlers[tool];
+if (!handler) {
+  throw new Error(`confirmAndRun: no handler registered for ${tool}`);
+}
+console.log(`  ${handler(args)}`);
 console.log(`  executed the approved amount, not the swapped one`);
 
 console.log(`\n${line}\nThe same token is presented again\n${line}`);
