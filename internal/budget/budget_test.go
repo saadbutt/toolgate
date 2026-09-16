@@ -2,6 +2,7 @@ package budget_test
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -103,5 +104,54 @@ func TestChargeMoneyDoesNotCountAStep(t *testing.T) {
 	}
 	if err := l.ChargeMoney("a", 2_000); !errors.Is(err, budget.Exceeded) {
 		t.Fatalf("overspend allowed: %v", err)
+	}
+}
+
+// TestChargeCannotWrapTheLedger covers int64 overflow. A charge near the top
+// of the range used to wrap the running total negative, passing the check and
+// leaving room for everything after it.
+func TestChargeCannotWrapTheLedger(t *testing.T) {
+	l := budget.New(budget.Limits{MaxMoney: 10_000, MaxTokens: 10_000, Window: time.Hour})
+	if err := l.Charge("a", 100, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ChargeMoney("a", math.MaxInt64); !errors.Is(err, budget.Exceeded) {
+		t.Fatalf("money charge near MaxInt64 allowed: %v", err)
+	}
+	if err := l.Charge("a", math.MaxInt64, 0); !errors.Is(err, budget.Exceeded) {
+		t.Fatalf("token charge near MaxInt64 allowed: %v", err)
+	}
+	if _, tokens, money := l.Usage("a"); tokens != 100 || money != 100 {
+		t.Fatalf("ledger moved to tokens=%d money=%d", tokens, money)
+	}
+}
+
+// TestUnlimitedDimensionCannotWrap covers a dimension with no ceiling. It
+// still cannot pass the end of the int64 range.
+func TestUnlimitedDimensionCannotWrap(t *testing.T) {
+	l := budget.New(budget.Limits{Window: time.Hour})
+	if err := l.ChargeMoney("a", math.MaxInt64); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ChargeMoney("a", 1); err == nil {
+		t.Fatal("unlimited money total wrapped past MaxInt64")
+	}
+	if _, _, money := l.Usage("a"); money != math.MaxInt64 {
+		t.Fatalf("ledger moved to %d", money)
+	}
+}
+
+// TestNegativeChargesAreRefused covers a caller paying the ledger back.
+func TestNegativeChargesAreRefused(t *testing.T) {
+	l := budget.New(budget.Limits{MaxTokens: 1_000, MaxMoney: 1_000, Window: time.Hour})
+	_ = l.Charge("a", 900, 900)
+	if err := l.Charge("a", -900, 0); !errors.Is(err, budget.ErrNegativeCharge) {
+		t.Fatalf("negative tokens accepted: %v", err)
+	}
+	if err := l.ChargeMoney("a", -900); !errors.Is(err, budget.ErrNegativeCharge) {
+		t.Fatalf("negative money accepted: %v", err)
+	}
+	if steps, tokens, money := l.Usage("a"); steps != 1 || tokens != 900 || money != 900 {
+		t.Fatalf("ledger moved to steps=%d tokens=%d money=%d", steps, tokens, money)
 	}
 }

@@ -402,6 +402,23 @@ func TestMalformedCallsAreNotFree(t *testing.T) {
 	}
 }
 
+// TestNegativeTokenCountIsRefusedUnderItsOwnRule covers a host reporting
+// negative usage. It must not pay the ledger back, and the audit log must not
+// call it a ceiling being reached.
+func TestNegativeTokenCountIsRefusedUnderItsOwnRule(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	_, err := h.g.Submit(context.Background(), agent(fullScope()), gate.Call{
+		Tool: "lookup_invoice", Args: tools.Args{"invoice_id": "INV-1001"}, TokensUsed: -5000,
+	})
+	if !errors.Is(err, budget.ErrNegativeCharge) {
+		t.Fatalf("negative token count: got %v", err)
+	}
+	entries := h.log.Entries()
+	if len(entries) != 1 || entries[0].Rule != "negative_charge" {
+		t.Fatalf("audit entries: %+v, want one refusal under negative_charge", entries)
+	}
+}
+
 // TestRefusedRawInputIsBoundedInTheAuditLog covers the model output that
 // never passed a schema. It is still recorded, but a megabyte of it must not
 // become a megabyte per audit entry.

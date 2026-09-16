@@ -165,7 +165,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 	// Malformed calls are the most common model failure, so a ceiling that
 	// only counted well-formed ones would miss the loop it exists to stop.
 	if err := g.budget.Charge(p.ID, c.TokensUsed, 0); err != nil {
-		g.deny(p, clip(c.Tool), rawArgs(c.Args), "budget_exceeded", err.Error(), c.Model)
+		g.deny(p, clip(c.Tool), rawArgs(c.Args), budgetRule(err), err.Error(), c.Model)
 		return Outcome{Status: Refused, Reason: err.Error()}, err
 	}
 
@@ -195,7 +195,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 	req := policy.Request{Principal: p, Tool: tool, Args: clean, Now: g.now()}
 	if amount, ok := req.Amount(); ok {
 		if err := g.budget.ChargeMoney(p.ID, amount); err != nil {
-			g.deny(p, tool.Name, clean, "budget_exceeded", err.Error(), c.Model)
+			g.deny(p, tool.Name, clean, budgetRule(err), err.Error(), c.Model)
 			return Outcome{Status: Refused, Reason: err.Error()}, err
 		}
 	}
@@ -426,6 +426,14 @@ func rawArgs(args tools.Args) tools.Args {
 		}
 	}
 	return out
+}
+
+// budgetRule names a budget refusal for the audit log.
+func budgetRule(err error) string {
+	if errors.Is(err, budget.ErrNegativeCharge) {
+		return "negative_charge"
+	}
+	return "budget_exceeded"
 }
 
 func outcomeWord(replayed bool) string {

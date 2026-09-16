@@ -143,3 +143,17 @@ func TestFieldWithoutATypeCannotBeRegistered(t *testing.T) {
 		t.Fatalf("field with no declared type registered: %v", err)
 	}
 }
+
+// TestMoneyFieldWithoutAMaximumCannotBeRegistered covers the bound that used
+// to be optional. Without it a money field accepted MaxInt64.
+func TestMoneyFieldWithoutAMaximumCannotBeRegistered(t *testing.T) {
+	r := tools.NewRegistry()
+	err := r.Register(tools.Tool{
+		Name: "issue_refund", Risk: tools.Consequential, Idempotent: true,
+		Schema:  tools.Schema{Fields: []tools.Field{{Name: "amount_cents", Type: tools.Money, Required: true}}},
+		Handler: func(context.Context, tools.Args) (tools.Result, error) { return tools.Result{}, nil },
+	})
+	if !errors.Is(err, tools.ErrBadSchema) {
+		t.Fatalf("money field with no maximum registered: %v", err)
+	}
+}

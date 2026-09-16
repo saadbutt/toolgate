@@ -9,6 +9,7 @@ package budget
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -40,6 +41,9 @@ func (e *ErrExceeded) Is(target error) bool { return target == Exceeded }
 
 // Exceeded is the sentinel for any ceiling breach.
 var Exceeded = errors.New("budget exceeded")
+
+// ErrNegativeCharge means a charge tried to give consumption back.
+var ErrNegativeCharge = errors.New("budget: charges cannot be negative")
 
 type ledger struct {
 	steps  int
@@ -95,6 +99,10 @@ func (l *Ledger) ChargeMoney(principal string, money int64) error {
 }
 
 func (l *Ledger) charge(principal string, steps int, tokens, money int64) error {
+	if tokens < 0 || money < 0 {
+		return ErrNegativeCharge
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -108,17 +116,30 @@ func (l *Ledger) charge(principal string, steps int, tokens, money int64) error 
 	if l.limits.MaxSteps > 0 && led.steps+steps > l.limits.MaxSteps {
 		return &ErrExceeded{Dimension: "steps", Used: int64(led.steps), Limit: int64(l.limits.MaxSteps)}
 	}
-	if l.limits.MaxTokens > 0 && led.tokens+tokens > l.limits.MaxTokens {
-		return &ErrExceeded{Dimension: "tokens", Used: led.tokens, Limit: l.limits.MaxTokens}
+	if limit := ceiling(l.limits.MaxTokens); tokens > limit-led.tokens {
+		return &ErrExceeded{Dimension: "tokens", Used: led.tokens, Limit: limit}
 	}
-	if l.limits.MaxMoney > 0 && led.money+money > l.limits.MaxMoney {
-		return &ErrExceeded{Dimension: "money", Used: led.money, Limit: l.limits.MaxMoney}
+	if limit := ceiling(l.limits.MaxMoney); money > limit-led.money {
+		return &ErrExceeded{Dimension: "money", Used: led.money, Limit: limit}
 	}
 
 	led.steps += steps
 	led.tokens += tokens
 	led.money += money
 	return nil
+}
+
+// ceiling returns the effective limit for a dimension. Unlimited still ends at
+// the top of the int64 range, so a running total can never wrap negative.
+//
+// The checks compare the charge against limit-used rather than adding it to
+// used. Totals only grow and never pass their limit, so the subtraction
+// cannot overflow, where the addition could.
+func ceiling(limit int64) int64 {
+	if limit <= 0 {
+		return math.MaxInt64
+	}
+	return limit
 }
 
 // Usage reports current consumption for a principal.

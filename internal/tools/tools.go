@@ -90,7 +90,9 @@ type Field struct {
 	Name     string
 	Type     FieldType
 	Required bool
-	// Min and Max bound Int and Money fields, and are inclusive.
+	// Min and Max bound Int and Money fields, and are inclusive. Max is
+	// required on Money fields: an unbounded amount is how a single call
+	// reaches the top of the int64 range.
 	Min, Max int64
 	// MaxLen bounds String fields.
 	MaxLen int
@@ -187,6 +189,9 @@ func (s Schema) check() error {
 	for _, f := range s.Fields {
 		if !f.Type.Valid() {
 			return fmt.Errorf("field %q declares no valid type", f.Name)
+		}
+		if f.Type == Money && f.Max <= 0 {
+			return fmt.Errorf("money field %q declares no maximum", f.Name)
 		}
 	}
 	return nil
