@@ -87,3 +87,21 @@ func TestConcurrentChargesRespectTheCeiling(t *testing.T) {
 		t.Fatalf("%d charges passed a ceiling of %d", ok.Load(), ceiling)
 	}
 }
+
+// TestChargeMoneyDoesNotCountAStep guards the split the gate relies on: one
+// step when a call arrives, its money once the amount is known.
+func TestChargeMoneyDoesNotCountAStep(t *testing.T) {
+	l := budget.New(budget.Limits{MaxSteps: 1, MaxMoney: 10_000, Window: time.Hour})
+	if err := l.Charge("a", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ChargeMoney("a", 9_000); err != nil {
+		t.Fatalf("money refused by the step ceiling: %v", err)
+	}
+	if steps, _, money := l.Usage("a"); steps != 1 || money != 9_000 {
+		t.Fatalf("usage is %d steps, %d money", steps, money)
+	}
+	if err := l.ChargeMoney("a", 2_000); !errors.Is(err, budget.Exceeded) {
+		t.Fatalf("overspend allowed: %v", err)
+	}
+}

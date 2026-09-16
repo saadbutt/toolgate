@@ -3,6 +3,7 @@ package gate_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ type harness struct {
 	bill *billing.System
 	log  *audit.Log
 	conf *confirm.Store
+	bud  *budget.Ledger
 }
 
 func newHarness(t *testing.T, lim budget.Limits) *harness {
@@ -38,8 +40,9 @@ func newHarness(t *testing.T, lim budget.Limits) *harness {
 	}
 	log := audit.New()
 	conf := confirm.NewStore(2 * time.Minute)
-	g := gate.New(reg, policy.NewEngine(policy.DefaultRules()...), budget.New(lim), conf, log)
-	return &harness{g: g, bill: bill, log: log, conf: conf}
+	bud := budget.New(lim)
+	g := gate.New(reg, policy.NewEngine(policy.DefaultRules()...), bud, conf, log)
+	return &harness{g: g, bill: bill, log: log, conf: conf, bud: bud}
 }
 
 func agent(scope policy.Scope) policy.Principal {
@@ -362,6 +365,69 @@ func TestBudgetCeilingStopsRunawayLoop(t *testing.T) {
 	}
 	if refused == 0 {
 		t.Fatal("loop ran 40 times against a 5-step ceiling without being stopped")
+	}
+}
+
+// TestMalformedCallsAreNotFree is the loop the step ceiling exists to stop.
+// Malformed calls are the most common model failure, so a ceiling that only
+// counts well-formed calls misses it.
+func TestMalformedCallsAreNotFree(t *testing.T) {
+	cases := []struct {
+		name string
+		call gate.Call
+	}{
+		{"unknown tool", gate.Call{Tool: "refund_everything", Args: tools.Args{"all": true}}},
+		{"schema invalid", gate.Call{Tool: "issue_refund", Args: tools.Args{"amount_cents": "lots"}, IdempotencyKey: "k"}},
+		{"missing idempotency key", gate.Call{Tool: "draft_refund", Args: tools.Args{"invoice_id": "INV-1001", "amount_cents": 100, "reason": "x"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, budget.Limits{MaxSteps: 10})
+			p := agent(fullScope())
+
+			var exceeded int
+			for i := 0; i < 1000; i++ {
+				if _, err := h.g.Submit(context.Background(), p, tc.call); errors.Is(err, budget.Exceeded) {
+					exceeded++
+				}
+			}
+			if steps, _, _ := h.bud.Usage(p.ID); steps != 10 {
+				t.Fatalf("ledger shows %d steps after 1000 calls against a 10-step ceiling", steps)
+			}
+			if exceeded != 990 {
+				t.Fatalf("%d of 1000 calls hit the ceiling, want 990", exceeded)
+			}
+		})
+	}
+}
+
+// TestRefusedRawInputIsBoundedInTheAuditLog covers the model output that
+// never passed a schema. It is still recorded, but a megabyte of it must not
+// become a megabyte per audit entry.
+func TestRefusedRawInputIsBoundedInTheAuditLog(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	p := agent(fullScope())
+	huge := strings.Repeat("A", 1<<20)
+
+	_, _ = h.g.Submit(context.Background(), p, gate.Call{Tool: huge, Args: tools.Args{"x": huge}})
+	_, _ = h.g.Submit(context.Background(), p, gate.Call{
+		Tool: "issue_refund", IdempotencyKey: "k",
+		Args: tools.Args{"invoice_id": huge, "amount_cents": 100, "reason": "x"},
+	})
+	many := tools.Args{}
+	for i := 0; i < 10_000; i++ {
+		many[fmt.Sprintf("field_%d", i)] = i
+	}
+	_, _ = h.g.Submit(context.Background(), p, gate.Call{Tool: "lookup_invoice", Args: many})
+
+	entries := h.log.Entries()
+	if len(entries) != 3 {
+		t.Fatalf("got %d audit entries, want 3", len(entries))
+	}
+	for _, e := range entries {
+		if n := len(e.Tool) + len(e.Args); n > 4096 {
+			t.Errorf("audit entry for rule %s holds %d bytes of raw model output", e.Rule, n)
+		}
 	}
 }
 

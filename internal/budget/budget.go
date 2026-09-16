@@ -81,6 +81,20 @@ func (l *Ledger) SetClock(f func() time.Time) {
 // "may I" and "I did" is how concurrent agents both pass a check that only
 // one of them should have.
 func (l *Ledger) Charge(principal string, tokens, money int64) error {
+	return l.charge(principal, 1, tokens, money)
+}
+
+// ChargeMoney records money against a principal without counting a step.
+//
+// A gate charges the step the moment a call arrives, before anything about it
+// is known to be valid, and only learns the amount once the arguments have
+// been validated. Counting a second step for the same call would quietly halve
+// the ceiling.
+func (l *Ledger) ChargeMoney(principal string, money int64) error {
+	return l.charge(principal, 0, 0, money)
+}
+
+func (l *Ledger) charge(principal string, steps int, tokens, money int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -91,7 +105,7 @@ func (l *Ledger) Charge(principal string, tokens, money int64) error {
 		l.per[principal] = led
 	}
 
-	if l.limits.MaxSteps > 0 && led.steps+1 > l.limits.MaxSteps {
+	if l.limits.MaxSteps > 0 && led.steps+steps > l.limits.MaxSteps {
 		return &ErrExceeded{Dimension: "steps", Used: int64(led.steps), Limit: int64(l.limits.MaxSteps)}
 	}
 	if l.limits.MaxTokens > 0 && led.tokens+tokens > l.limits.MaxTokens {
@@ -101,7 +115,7 @@ func (l *Ledger) Charge(principal string, tokens, money int64) error {
 		return &ErrExceeded{Dimension: "money", Used: led.money, Limit: l.limits.MaxMoney}
 	}
 
-	led.steps++
+	led.steps += steps
 	led.tokens += tokens
 	led.money += money
 	return nil

@@ -1,15 +1,17 @@
 // Package gate is the single path a tool call has to take.
 //
-// Order matters and is fixed: validate, charge, decide, execute, record.
-// Nothing here lets a caller skip a step or reorder them, because every
-// interesting failure in agent systems comes from a step that was skipped
-// once, for a good reason, in a hurry.
+// Order matters and is fixed: charge a step, validate, charge money, decide,
+// execute, record. Nothing here lets a caller skip a step or reorder them,
+// because every interesting failure in agent systems comes from a step that
+// was skipped once, for a good reason, in a hurry.
 package gate
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,17 +149,26 @@ var (
 // Every refusal is recorded. A gate that only logs what it permitted tells
 // you nothing about what someone tried.
 func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome, error) {
-	tool, err := g.tools.Lookup(c.Tool)
-	if err != nil {
-		g.deny(p, c.Tool, c.Args, "unknown_tool", err.Error(), c.Model)
+	// 1. Charge the step before anything about the call is known to be valid.
+	// Malformed calls are the most common model failure, so a ceiling that
+	// only counted well-formed ones would miss the loop it exists to stop.
+	if err := g.budget.Charge(p.ID, c.TokensUsed, 0); err != nil {
+		g.deny(p, clip(c.Tool), rawArgs(c.Args), "budget_exceeded", err.Error(), c.Model)
 		return Outcome{Status: Refused, Reason: err.Error()}, err
 	}
 
-	// 1. Validate before anything else. Unvalidated arguments must never
-	// reach policy, because policy decisions are made about their values.
+	tool, err := g.tools.Lookup(c.Tool)
+	if err != nil {
+		g.deny(p, clip(c.Tool), rawArgs(c.Args), "unknown_tool", err.Error(), c.Model)
+		return Outcome{Status: Refused, Reason: err.Error()}, err
+	}
+
+	// 2. Validate before anything else sees the arguments. Unvalidated
+	// arguments must never reach policy, because policy decisions are made
+	// about their values.
 	clean, err := tool.Schema.Validate(c.Args)
 	if err != nil {
-		g.deny(p, tool.Name, c.Args, "schema_invalid", err.Error(), c.Model)
+		g.deny(p, tool.Name, rawArgs(c.Args), "schema_invalid", err.Error(), c.Model)
 		return Outcome{Status: Refused, Reason: err.Error()}, err
 	}
 
@@ -166,16 +177,18 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 		return Outcome{Status: Refused, Reason: ErrMissingIdempotencyKey.Error()}, ErrMissingIdempotencyKey
 	}
 
-	// 2. Charge the budget before deciding. A refused call still consumed a
-	// step, otherwise an agent can probe the policy engine for free.
+	// 3. Charge the money before deciding, now that validated arguments say
+	// how much. A refused refund still counts, otherwise an agent can probe
+	// its cap for free.
 	req := policy.Request{Principal: p, Tool: tool, Args: clean, Now: g.now()}
-	amount, _ := req.Amount()
-	if err := g.budget.Charge(p.ID, c.TokensUsed, amount); err != nil {
-		g.deny(p, tool.Name, clean, "budget_exceeded", err.Error(), c.Model)
-		return Outcome{Status: Refused, Reason: err.Error()}, err
+	if amount, ok := req.Amount(); ok {
+		if err := g.budget.ChargeMoney(p.ID, amount); err != nil {
+			g.deny(p, tool.Name, clean, "budget_exceeded", err.Error(), c.Model)
+			return Outcome{Status: Refused, Reason: err.Error()}, err
+		}
 	}
 
-	// 3. Decide. Authority comes from p.Scope and nothing else.
+	// 4. Decide. Authority comes from p.Scope and nothing else.
 	verdict := g.policy.Evaluate(req)
 
 	switch verdict.Decision {
@@ -208,7 +221,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 		}, nil
 	}
 
-	// 4. Execute.
+	// 5. Execute.
 	key := c.IdempotencyKey
 	if key == "" {
 		key = tool.Name + ":read:" + g.now().Format(time.RFC3339Nano)
@@ -356,6 +369,50 @@ func (g *Gate) takeRequester(intentID string) (policy.Principal, bool) {
 	r, ok := g.requesters[intentID]
 	delete(g.requesters, intentID)
 	return r.principal, ok
+}
+
+// Bounds on how much unvalidated model output one refusal writes to the audit
+// log. Arguments that failed validation never had MaxLen applied, and a model
+// in a loop can send the same megabyte forever.
+const (
+	maxRawFields = 16
+	maxRawLen    = 128
+)
+
+// clip shortens a string that came straight from the model.
+func clip(s string) string {
+	if len(s) <= maxRawLen {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxRawLen], "") + "...[truncated]"
+}
+
+// rawArgs is what gets recorded for arguments that never passed validation:
+// the first maxRawFields fields in key order, keys and strings clipped, and
+// anything that is not a scalar replaced by its type.
+func rawArgs(args tools.Args) tools.Args {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make(tools.Args, maxRawFields+1)
+	for i, k := range keys {
+		if i == maxRawFields {
+			out["[omitted_fields]"] = len(keys) - maxRawFields
+			break
+		}
+		switch v := args[k].(type) {
+		case string:
+			out[clip(k)] = clip(v)
+		case nil, bool, int, int64, float64:
+			out[clip(k)] = v
+		default:
+			out[clip(k)] = fmt.Sprintf("[%T]", v)
+		}
+	}
+	return out
 }
 
 func outcomeWord(replayed bool) string {

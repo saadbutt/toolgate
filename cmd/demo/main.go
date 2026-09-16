@@ -297,31 +297,40 @@ func argTamper(r *rig) error {
 	return expect(r.bill.TotalRefunded() == 4200, "executed an amount nobody approved")
 }
 
-// 6. The failure that actually happens in production.
+// 6. The failure that actually happens in production: the same broken call,
+// retried. It never passes validation, and the ceiling still counts it.
 func runawayLoop(r *rig) error {
 	rig := newRigWithLimits(budget.Limits{MaxSteps: 6, MaxTokens: 500_000, MaxMoney: 500_000})
 	p := theAgent()
 
-	say("ceiling: 6 tool calls. the model will try 30 times.")
-	say("")
-	var ok, refused int
+	say("ceiling: 6 tool calls. the model will send the same malformed call 30 times.")
+	model("calling draft_refund(INV-1001, amount_cents=\"forty-two\"), on repeat")
+	var invalid, stopped int
 	for i := 0; i < 30; i++ {
 		_, err := rig.g.Submit(context.Background(), p, gate.Call{
-			Tool: "lookup_invoice", Args: tools.Args{"invoice_id": "INV-1001"}, TokensUsed: 800,
+			Tool:           "draft_refund",
+			Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": "forty-two", "reason": "retry"},
+			IdempotencyKey: fmt.Sprintf("demo-6-%d", i),
+			TokensUsed:     800,
 		})
-		if errors.Is(err, budget.Exceeded) {
-			refused++
-			if refused == 1 {
+		var ve *tools.ValidationError
+		switch {
+		case errors.Is(err, budget.Exceeded):
+			stopped++
+			if stopped == 1 {
 				gateSays("attempt %d: %v", i+1, err)
 			}
-			continue
+		case errors.As(err, &ve):
+			invalid++
+			if invalid == 1 {
+				gateSays("attempt %d: %v", i+1, err)
+			}
 		}
-		ok++
 	}
 	say("")
-	say("executed: %d   refused: %d", ok, refused)
-	say("without a step ceiling this loop runs until something else breaks.")
-	return expect(refused > 0 && ok <= 6, "loop was not stopped")
+	say("refused by the schema: %d   stopped by the ceiling: %d", invalid, stopped)
+	say("malformed calls are charged too. if they were free, this loop would never end.")
+	return expect(invalid == 6 && stopped == 24, "loop was not stopped")
 }
 
 // 7. Editing history is detectable, which is the honest claim.
