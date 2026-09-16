@@ -362,10 +362,6 @@ func (g *Gate) refuse(p policy.Principal, tool string, args tools.Args, v policy
 // remember stores who asked for an intent, and forgets any whose intent has
 // expired, so abandoned approvals do not accumulate.
 func (g *Gate) remember(in *confirm.Intent, p policy.Principal) {
-	// Scope is a value, but its Tools slice is not. Copy it so the caller
-	// cannot widen the stored grant through their own slice.
-	p.Scope.Tools = append([]string(nil), p.Scope.Tools...)
-
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()

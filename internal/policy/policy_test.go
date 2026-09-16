@@ -30,7 +30,7 @@ func agentWith(scope policy.Scope) policy.Principal {
 
 func TestEmptyEngineDeniesEverything(t *testing.T) {
 	v := policy.NewEngine().Evaluate(policy.Request{
-		Principal: agentWith(policy.Scope{Tools: []string{"lookup_invoice"}}),
+		Principal: agentWith(policy.Scope{Tools: policy.NewToolSet("lookup_invoice")}),
 		Tool:      readTool(), Now: time.Now(),
 	})
 	if v.Decision != policy.Deny || v.Rule != "default_deny" {
@@ -40,7 +40,7 @@ func TestEmptyEngineDeniesEverything(t *testing.T) {
 
 func TestConsequentialAlwaysNeedsConfirmationForAgents(t *testing.T) {
 	v := engine().Evaluate(policy.Request{
-		Principal: agentWith(policy.Scope{Tools: []string{"issue_refund"}, MaxAmount: 100_000}),
+		Principal: agentWith(policy.Scope{Tools: policy.NewToolSet("issue_refund"), MaxAmount: 100_000}),
 		Tool:      consequential(),
 		Args:      tools.Args{"amount_cents": int64(500)},
 		Now:       time.Now(),
@@ -53,7 +53,7 @@ func TestConsequentialAlwaysNeedsConfirmationForAgents(t *testing.T) {
 // TestDenyRulesRunBeforeAllowRules is about ordering. An expired grant must
 // lose even when a later rule would have permitted the call.
 func TestDenyRulesRunBeforeAllowRules(t *testing.T) {
-	expired := policy.Scope{Tools: []string{"lookup_invoice"}, ExpiresAt: time.Now().Add(-time.Hour)}
+	expired := policy.Scope{Tools: policy.NewToolSet("lookup_invoice"), ExpiresAt: time.Now().Add(-time.Hour)}
 	v := engine().Evaluate(policy.Request{
 		Principal: agentWith(expired), Tool: readTool(), Now: time.Now(),
 	})
@@ -63,7 +63,7 @@ func TestDenyRulesRunBeforeAllowRules(t *testing.T) {
 }
 
 func TestScopeIsNotWidenedByAnything(t *testing.T) {
-	s := policy.Scope{Tools: []string{"lookup_invoice"}, MaxAmount: 100}
+	s := policy.Scope{Tools: policy.NewToolSet("lookup_invoice"), MaxAmount: 100}
 	before := s.Fingerprint()
 
 	// Pass it through evaluation repeatedly, including calls it refuses.
@@ -80,17 +80,17 @@ func TestScopeIsNotWidenedByAnything(t *testing.T) {
 }
 
 func TestFingerprintIsOrderIndependent(t *testing.T) {
-	a := policy.Scope{Tools: []string{"b", "a", "c"}, MaxAmount: 5}
-	b := policy.Scope{Tools: []string{"c", "b", "a"}, MaxAmount: 5}
+	a := policy.Scope{Tools: policy.NewToolSet("b", "a", "c"), MaxAmount: 5}
+	b := policy.Scope{Tools: policy.NewToolSet("c", "b", "a"), MaxAmount: 5}
 	if a.Fingerprint() != b.Fingerprint() {
 		t.Fatalf("%s != %s", a.Fingerprint(), b.Fingerprint())
 	}
 }
 
 func TestFingerprintChangesWhenGrantChanges(t *testing.T) {
-	a := policy.Scope{Tools: []string{"x"}, MaxAmount: 5}
-	b := policy.Scope{Tools: []string{"x", "y"}, MaxAmount: 5}
-	c := policy.Scope{Tools: []string{"x"}, MaxAmount: 6}
+	a := policy.Scope{Tools: policy.NewToolSet("x"), MaxAmount: 5}
+	b := policy.Scope{Tools: policy.NewToolSet("x", "y"), MaxAmount: 5}
+	c := policy.Scope{Tools: policy.NewToolSet("x"), MaxAmount: 6}
 	if a.Fingerprint() == b.Fingerprint() || a.Fingerprint() == c.Fingerprint() {
 		t.Fatal("fingerprint does not distinguish different grants")
 	}
@@ -108,7 +108,7 @@ func TestHumanIsNotBoundByAgentScope(t *testing.T) {
 }
 
 func TestServicePrincipalIsStillSubjectToScope(t *testing.T) {
-	svc := policy.Principal{ID: "svc", Kind: policy.Service, Scope: policy.Scope{Tools: []string{"other"}}}
+	svc := policy.Principal{ID: "svc", Kind: policy.Service, Scope: policy.Scope{Tools: policy.NewToolSet("other")}}
 	v := engine().Evaluate(policy.Request{Principal: svc, Tool: readTool(), Now: time.Now()})
 	if v.Decision != policy.Deny || v.Rule != "tool_outside_scope" {
 		t.Fatalf("internal service bypassed policy: %+v", v)
@@ -130,10 +130,44 @@ func TestEngineIsSafeForConcurrentUse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			e.Evaluate(policy.Request{
-				Principal: agentWith(policy.Scope{Tools: []string{"lookup_invoice"}}),
+				Principal: agentWith(policy.Scope{Tools: policy.NewToolSet("lookup_invoice")}),
 				Tool:      readTool(), Now: time.Now(),
 			})
 		}()
 	}
 	wg.Wait()
+}
+
+// TestRuleCannotWidenTheCallersScopeThroughACopy covers a rule writing to the
+// request it was handed. Whatever it does to its copy of the scope, the
+// caller's grant is unchanged.
+func TestRuleCannotWidenTheCallersScopeThroughACopy(t *testing.T) {
+	scope := policy.Scope{Tools: policy.NewToolSet("lookup_invoice")}
+	before := scope.Fingerprint()
+	e := policy.NewEngine(policy.Rule{
+		Name: "writes_through_its_copy", Then: policy.Deny,
+		Match: func(r policy.Request) bool {
+			r.Principal.Scope.Tools.Names()[0] = "issue_refund"
+			r.Principal.Scope.Tools = policy.NewToolSet("issue_refund")
+			return false
+		},
+	})
+	e.Evaluate(policy.Request{Principal: agentWith(scope), Tool: readTool(), Now: time.Now()})
+	if after := scope.Fingerprint(); after != before {
+		t.Fatalf("a rule widened the caller's scope:\n before %s\n after  %s", before, after)
+	}
+}
+
+// TestToolSetDoesNotShareMemoryWithItsCaller covers both directions: the
+// slice a set was built from, and the slice Names hands back.
+func TestToolSetDoesNotShareMemoryWithItsCaller(t *testing.T) {
+	names := []string{"lookup_invoice"}
+	s := policy.Scope{Tools: policy.NewToolSet(names...)}
+
+	names[0] = "issue_refund"
+	s.Tools.Names()[0] = "issue_refund"
+
+	if s.Allows("issue_refund") || !s.Allows("lookup_invoice") {
+		t.Fatalf("tool set changed through a caller's slice: %v", s.Tools.Names())
+	}
 }

@@ -7,6 +7,7 @@ package policy
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -41,14 +42,42 @@ func (k Kind) String() string {
 	}
 }
 
+// ToolSet is a fixed set of tool names. Build one with NewToolSet.
+//
+// Its contents are unexported, never written after construction, and only
+// ever handed out as copies. A plain []string would not do: a slice copied by
+// value still shares its backing array, so every copy of a Scope could write
+// into the grant it was copied from.
+type ToolSet struct {
+	names []string // sorted, no duplicates
+}
+
+// NewToolSet builds a ToolSet. The names are copied, so changing the slice
+// afterwards changes nothing.
+func NewToolSet(names ...string) ToolSet {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	return ToolSet{names: slices.Compact(sorted)}
+}
+
+// Contains reports whether name is in the set.
+func (t ToolSet) Contains(name string) bool {
+	_, found := slices.BinarySearch(t.names, name)
+	return found
+}
+
+// Names returns the tool names in sorted order, as a copy.
+func (t ToolSet) Names() []string { return append([]string(nil), t.names...) }
+
 // Scope is the capability grant an agent operates under.
 //
 // It is passed by value everywhere on purpose. There is no method on this
-// type that widens it, and nothing in the request path holds a pointer that
-// could be mutated mid-session.
+// type that widens it, nothing in the request path holds a pointer that could
+// be mutated mid-session, and every field is either a plain value or
+// immutable, so a copy cannot reach back into the grant it came from.
 type Scope struct {
 	// Tools is the complete set of tool names this principal may call.
-	Tools []string
+	Tools ToolSet
 	// MaxAmount caps money-moving calls, in minor units.
 	MaxAmount int64
 	// ExpiresAt bounds the grant in time. Zero means no expiry, which is
@@ -62,8 +91,7 @@ type Scope struct {
 // agent processed hostile content. Comparing a fingerprint is a cheap way to
 // state "authority is unchanged" as a checkable fact rather than a hope.
 func (s Scope) Fingerprint() string {
-	names := append([]string(nil), s.Tools...)
-	sort.Strings(names)
+	names := s.Tools.names
 	exp := "never"
 	if !s.ExpiresAt.IsZero() {
 		exp = s.ExpiresAt.UTC().Format(time.RFC3339)
@@ -72,14 +100,7 @@ func (s Scope) Fingerprint() string {
 }
 
 // Allows reports whether the named tool is inside this grant.
-func (s Scope) Allows(tool string) bool {
-	for _, t := range s.Tools {
-		if t == tool {
-			return true
-		}
-	}
-	return false
-}
+func (s Scope) Allows(tool string) bool { return s.Tools.Contains(tool) }
 
 // Principal is who is asking.
 type Principal struct {

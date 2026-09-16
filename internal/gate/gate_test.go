@@ -52,7 +52,7 @@ func agent(scope policy.Scope) policy.Principal {
 
 func fullScope() policy.Scope {
 	return policy.Scope{
-		Tools:     []string{"lookup_invoice", "draft_refund", "issue_refund"},
+		Tools:     policy.NewToolSet("lookup_invoice", "draft_refund", "issue_refund"),
 		MaxAmount: 50_000,
 	}
 }
@@ -307,7 +307,7 @@ func TestRetrievedContentCannotEscalatePermissions(t *testing.T) {
 
 func TestToolOutsideScopeIsRefused(t *testing.T) {
 	h := newHarness(t, budget.Limits{})
-	narrow := agent(policy.Scope{Tools: []string{"lookup_invoice"}, MaxAmount: 1000})
+	narrow := agent(policy.Scope{Tools: policy.NewToolSet("lookup_invoice"), MaxAmount: 1000})
 
 	out, err := h.g.Submit(context.Background(), narrow, gate.Call{
 		Tool:           "issue_refund",
@@ -499,7 +499,7 @@ func TestRetryDoesNotDoubleExecute(t *testing.T) {
 // what was permitted.
 func TestAuditRecordsRefusalsNotJustSuccesses(t *testing.T) {
 	h := newHarness(t, budget.Limits{})
-	narrow := agent(policy.Scope{Tools: []string{"lookup_invoice"}})
+	narrow := agent(policy.Scope{Tools: policy.NewToolSet("lookup_invoice")})
 
 	_, _ = h.g.Submit(context.Background(), narrow, gate.Call{
 		Tool:           "issue_refund",

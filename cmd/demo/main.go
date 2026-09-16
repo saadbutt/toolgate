@@ -104,7 +104,7 @@ func theAgent() policy.Principal {
 	return policy.Principal{
 		ID: "agent-1", Kind: policy.Agent, OnBehalfOf: "saad",
 		Scope: policy.Scope{
-			Tools:     []string{"lookup_invoice", "draft_refund", "issue_refund"},
+			Tools:     policy.NewToolSet("lookup_invoice", "draft_refund", "issue_refund"),
 			MaxAmount: 50_000,
 			ExpiresAt: time.Now().Add(time.Hour),
 		},

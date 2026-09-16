@@ -68,7 +68,7 @@ Three principal types, because they are genuinely different:
 - **Agent** acts with a scoped, expiring subset of a human's authority, never more
 - **Service** has its own identity and is still subject to policy, because "internal" is not a security boundary
 
-Authority comes from the `Principal` the host passes in, never from tool arguments or tool output, and `Scope` has no method that widens it. That is what makes prompt injection containable: the attack has to change what the agent is permitted to do, and nothing the model sends or reads reaches the scope.
+Authority comes from the `Principal` the host passes in, never from tool arguments or tool output. `Scope` is passed by value and has no method that widens it, and its tool set is immutable, so no copy of a grant can write back into the original. That is what makes prompt injection containable: the attack has to change what the agent is permitted to do, and nothing the model sends or reads reaches the scope.
 
 The demo proves this rather than asserting it. It fingerprints the agent's authority, feeds it a live injection payload hidden in an invoice note, and prints the fingerprint again.
 
@@ -180,8 +180,6 @@ TestReconcileWritesEachRecordOnce
 **Idempotency is declared, not verified.** `Tool.Idempotent` is checked once, at registration. The gate's executor stops a repeated key from running twice within one process, but the demo billing system's `issue_refund` appends on every call and relies on that entirely.
 
 **There are no timeouts.** The context is passed through to the handler, and nothing in the gate sets a deadline or checks for cancellation.
-
-**Scope is not deeply immutable.** `Scope` is passed by value, but a slice copied by value still shares its backing array, so host code that holds a scope can change its `Tools` after handing it over. Nothing reachable from model output can.
 
 ## Why Go
 
