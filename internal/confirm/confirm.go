@@ -187,7 +187,7 @@ func (s *Store) Confirm(id, token, approver string) (string, tools.Args, error) 
 //
 // The gate does not need this, because it executes the frozen copy. It exists
 // so a caller that carries arguments alongside a token can prove they were not
-// swapped in transit, and so the demo can show the tampering case failing.
+// swapped in transit.
 func (s *Store) VerifyArgs(id string, args tools.Args) error {
 	s.mu.Lock()
 	in, ok := s.intents[id]

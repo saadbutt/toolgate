@@ -76,13 +76,17 @@ type Call struct {
 }
 
 // Gate wires the pieces together.
+//
+// Every collaborator is unexported. If the executor were reachable, calling
+// it directly would run a tool with no policy, no budget and no record, and
+// "the single path" would be a convention rather than a property.
 type Gate struct {
-	Tools   *tools.Registry
-	Policy  *policy.Engine
-	Budget  *budget.Ledger
-	Confirm *confirm.Store
-	Audit   *audit.Log
-	Exec    *exec.Executor
+	tools   *tools.Registry
+	policy  *policy.Engine
+	budget  *budget.Ledger
+	confirm *confirm.Store
+	audit   *audit.Log
+	exec    *exec.Executor
 
 	now func() time.Time
 
@@ -101,15 +105,15 @@ type requester struct {
 // New returns a Gate.
 func New(reg *tools.Registry, pol *policy.Engine, bud *budget.Ledger, conf *confirm.Store, log *audit.Log) *Gate {
 	g := &Gate{
-		Tools:      reg,
-		Policy:     pol,
-		Budget:     bud,
-		Confirm:    conf,
-		Audit:      log,
+		tools:      reg,
+		policy:     pol,
+		budget:     bud,
+		confirm:    conf,
+		audit:      log,
 		now:        time.Now,
 		requesters: make(map[string]requester),
 	}
-	g.Exec = exec.New(func(rec exec.Record) error {
+	g.exec = exec.New(func(rec exec.Record) error {
 		log.Record(audit.Entry{
 			Tool:     rec.Tool,
 			Decision: "executed",
@@ -143,7 +147,7 @@ var (
 // Every refusal is recorded. A gate that only logs what it permitted tells
 // you nothing about what someone tried.
 func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome, error) {
-	tool, err := g.Tools.Lookup(c.Tool)
+	tool, err := g.tools.Lookup(c.Tool)
 	if err != nil {
 		g.deny(p, c.Tool, c.Args, "unknown_tool", err.Error(), c.Model)
 		return Outcome{Status: Refused, Reason: err.Error()}, err
@@ -166,13 +170,13 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 	// step, otherwise an agent can probe the policy engine for free.
 	req := policy.Request{Principal: p, Tool: tool, Args: clean, Now: g.now()}
 	amount, _ := req.Amount()
-	if err := g.Budget.Charge(p.ID, c.TokensUsed, amount); err != nil {
+	if err := g.budget.Charge(p.ID, c.TokensUsed, amount); err != nil {
 		g.deny(p, tool.Name, clean, "budget_exceeded", err.Error(), c.Model)
 		return Outcome{Status: Refused, Reason: err.Error()}, err
 	}
 
 	// 3. Decide. Authority comes from p.Scope and nothing else.
-	verdict := g.Policy.Evaluate(req)
+	verdict := g.policy.Evaluate(req)
 
 	switch verdict.Decision {
 	case policy.Deny:
@@ -187,7 +191,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 			g.deny(p, tool.Name, clean, "no_approver", ErrNoApprover.Error(), c.Model)
 			return Outcome{Status: Refused, Reason: ErrNoApprover.Error()}, ErrNoApprover
 		}
-		intent, token, err := g.Confirm.Create(
+		intent, token, err := g.confirm.Create(
 			tool.Name, clean, summarise(tool, clean), p.ID, approver,
 		)
 		if err != nil {
@@ -209,7 +213,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 	if key == "" {
 		key = tool.Name + ":read:" + g.now().Format(time.RFC3339Nano)
 	}
-	res, replayed, err := g.Exec.Do(ctx, key, tool, clean)
+	res, replayed, err := g.exec.Do(ctx, key, tool, clean)
 	if err != nil {
 		g.record(p, tool.Name, clean, verdict, "error:"+err.Error(), c.Model)
 		return Outcome{Status: Refused, Verdict: verdict, Reason: err.Error()}, err
@@ -236,7 +240,7 @@ func (g *Gate) Submit(ctx context.Context, p policy.Principal, c Call) (Outcome,
 // asked and the human approving, at the time of approval.
 func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, intentID, token, idempotencyKey string) (Outcome, error) {
 	// Charged like any other call, so presenting guesses is not free.
-	if err := g.Budget.Charge(approver.ID, 0, 0); err != nil {
+	if err := g.budget.Charge(approver.ID, 0, 0); err != nil {
 		g.deny(approver, "confirm", nil, "budget_exceeded", err.Error(), "")
 		return Outcome{Status: Refused, Reason: err.Error()}, err
 	}
@@ -248,7 +252,7 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 		return Outcome{Status: Refused, Reason: ErrApproverNotHuman.Error()}, ErrApproverNotHuman
 	}
 
-	toolName, frozen, err := g.Confirm.Confirm(intentID, token, approver.ID)
+	toolName, frozen, err := g.confirm.Confirm(intentID, token, approver.ID)
 	if err != nil {
 		g.deny(approver, "confirm", nil, "confirmation_rejected", err.Error(), "")
 		return Outcome{Status: Refused, Reason: err.Error()}, err
@@ -260,7 +264,7 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 		return Outcome{Status: Refused, Reason: ErrUnknownIntent.Error()}, ErrUnknownIntent
 	}
 
-	tool, err := g.Tools.Lookup(toolName)
+	tool, err := g.tools.Lookup(toolName)
 	if err != nil {
 		g.deny(approver, toolName, frozen, "unknown_tool", err.Error(), "")
 		return Outcome{Status: Refused, Reason: err.Error()}, err
@@ -269,12 +273,12 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 	// Decide again. A grant that expired while the intent waited has expired,
 	// whatever the intent's own TTL says.
 	now := g.now()
-	if v := g.Policy.Evaluate(policy.Request{Principal: asker, Tool: tool, Args: frozen, Now: now}); v.Decision == policy.Deny {
+	if v := g.policy.Evaluate(policy.Request{Principal: asker, Tool: tool, Args: frozen, Now: now}); v.Decision == policy.Deny {
 		return g.refuse(asker, tool.Name, frozen, v, "")
 	}
 	// The approver has to be allowed to do this themselves. Approving cannot
 	// lend authority the approver does not hold.
-	if v := g.Policy.Evaluate(policy.Request{Principal: approver, Tool: tool, Args: frozen, Now: now}); v.Decision != policy.Allow {
+	if v := g.policy.Evaluate(policy.Request{Principal: approver, Tool: tool, Args: frozen, Now: now}); v.Decision != policy.Allow {
 		return g.refuse(approver, tool.Name, frozen, v, "")
 	}
 
@@ -282,7 +286,7 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 		idempotencyKey = "intent:" + intentID
 	}
 
-	res, replayed, err := g.Exec.Do(ctx, idempotencyKey, tool, frozen)
+	res, replayed, err := g.exec.Do(ctx, idempotencyKey, tool, frozen)
 	verdict := policy.Verdict{
 		Decision: policy.Allow,
 		Rule:     "human_confirmed",
@@ -305,7 +309,7 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 }
 
 func (g *Gate) record(p policy.Principal, tool string, args tools.Args, v policy.Verdict, outcome, model string) {
-	g.Audit.Record(audit.Entry{
+	g.audit.Record(audit.Entry{
 		Principal: p.ID,
 		Actor:     p.Kind.String(),
 		Tool:      tool,

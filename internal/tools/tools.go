@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Risk determines how much ceremony a call needs before it can happen.
@@ -114,8 +115,10 @@ type Tool struct {
 	Handler    Handler
 }
 
-// Registry holds the tools an agent may ask for by name.
+// Registry holds the tools an agent may ask for by name. Safe for concurrent
+// use: whoever built the registry still holds it after handing it to a gate.
 type Registry struct {
+	mu     sync.RWMutex
 	byName map[string]Tool
 }
 
@@ -147,6 +150,8 @@ func (r *Registry) Register(t Tool) error {
 	if t.Risk != Read && !t.Idempotent {
 		return fmt.Errorf("%w: %s", ErrNotIdempotent, t.Name)
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, dup := r.byName[t.Name]; dup {
 		return fmt.Errorf("tools: %s already registered", t.Name)
 	}
@@ -156,7 +161,9 @@ func (r *Registry) Register(t Tool) error {
 
 // Lookup returns a tool by name.
 func (r *Registry) Lookup(name string) (Tool, error) {
+	r.mu.RLock()
 	t, ok := r.byName[name]
+	r.mu.RUnlock()
 	if !ok {
 		return Tool{}, fmt.Errorf("%w: %q", ErrUnknownTool, name)
 	}
@@ -165,6 +172,8 @@ func (r *Registry) Lookup(name string) (Tool, error) {
 
 // Names lists registered tools in sorted order.
 func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.byName))
 	for n := range r.byName {
 		out = append(out, n)

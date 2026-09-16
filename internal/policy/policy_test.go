@@ -1,6 +1,7 @@
 package policy_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -112,4 +113,27 @@ func TestServicePrincipalIsStillSubjectToScope(t *testing.T) {
 	if v.Decision != policy.Deny || v.Rule != "tool_outside_scope" {
 		t.Fatalf("internal service bypassed policy: %+v", v)
 	}
+}
+
+// TestEngineIsSafeForConcurrentUse adds rules while other goroutines
+// evaluate. The caller keeps the engine it handed to the gate, so this is
+// reachable at runtime. Run it under -race.
+func TestEngineIsSafeForConcurrentUse(t *testing.T) {
+	e := engine()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			e.Add(policy.Rule{Name: "never", Then: policy.Deny, Match: func(policy.Request) bool { return false }})
+		}()
+		go func() {
+			defer wg.Done()
+			e.Evaluate(policy.Request{
+				Principal: agentWith(policy.Scope{Tools: []string{"lookup_invoice"}}),
+				Tool:      readTool(), Now: time.Now(),
+			})
+		}()
+	}
+	wg.Wait()
 }

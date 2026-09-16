@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/saadbutt/toolgate/internal/tools"
@@ -154,8 +155,10 @@ type Rule struct {
 	Reason string
 }
 
-// Engine evaluates requests against an ordered rule set.
+// Engine evaluates requests against an ordered rule set. Safe for concurrent
+// use: whoever built the engine still holds it after handing it to a gate.
 type Engine struct {
+	mu    sync.RWMutex
 	rules []Rule
 }
 
@@ -165,11 +168,22 @@ func NewEngine(rules ...Rule) *Engine {
 }
 
 // Add appends a rule to the end of the chain.
-func (e *Engine) Add(r Rule) { e.rules = append(e.rules, r) }
+func (e *Engine) Add(r Rule) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = append(e.rules, r)
+}
 
 // Evaluate runs the chain and returns the first matching verdict.
+//
+// The chain is read under the lock and run outside it. Add only ever appends,
+// so the rules seen here cannot change underneath, and a Match function that
+// itself touches the engine cannot deadlock.
 func (e *Engine) Evaluate(req Request) Verdict {
-	for _, r := range e.rules {
+	e.mu.RLock()
+	rules := e.rules
+	e.mu.RUnlock()
+	for _, r := range rules {
 		if r.Match(req) {
 			return Verdict{Decision: r.Then, Rule: r.Name, Reason: r.Reason}
 		}

@@ -68,11 +68,13 @@ func main() {
 }
 
 // rig is one fully wired gate plus the billing system behind it.
+//
+// It keeps the audit log, which is read to show what happened. It does not
+// keep the confirmation store: every scenario goes through the gate.
 type rig struct {
 	g    *gate.Gate
 	bill *billing.System
 	log  *audit.Log
-	conf *confirm.Store
 }
 
 func newRig() *rig {
@@ -93,7 +95,6 @@ func newRigWithLimits(lim budget.Limits) *rig {
 		g:    gate.New(reg, policy.NewEngine(policy.DefaultRules()...), budget.New(lim), conf, log),
 		bill: bill,
 		log:  log,
-		conf: conf,
 	}
 }
 
@@ -279,13 +280,13 @@ func argTamper(r *rig) error {
 	say("argument hash recorded: %s", out.Intent.ArgsHash[:16])
 
 	say("")
-	say("between approval and execution, the amount is changed to $4,200.00:")
-	tampered := tools.Args{"invoice_id": "INV-1002", "amount_cents": int64(420_000), "reason": "partial"}
-	verr := r.conf.VerifyArgs(out.Intent.ID, tampered)
-	gateSays("verification of swapped arguments: %v", verr)
+	say("between approval and execution, the agent edits the intent it was handed:")
+	out.Intent.Args["amount_cents"] = int64(420_000)
+	out.Intent.Approver = "agent-1"
+	say("  amount_cents=%v approver=%s", out.Intent.Args["amount_cents"], out.Intent.Approver)
 
 	say("")
-	say("and execution does not take arguments at all. it uses the frozen copy:")
+	say("that intent is a copy. execution takes no arguments and uses the frozen one:")
 	done, err := r.g.ConfirmAndRun(ctx, theHuman(), out.Intent.ID, out.Token, "demo-5c")
 	if err != nil {
 		return err
@@ -293,9 +294,6 @@ func argTamper(r *rig) error {
 	gateSays("%s", done.Result.Text)
 	say("refunded: %s, which is what was approved", money(r.bill.TotalRefunded()))
 
-	if err := expect(errors.Is(verr, confirm.ErrArgsMismatch), "tampering not detected"); err != nil {
-		return err
-	}
 	return expect(r.bill.TotalRefunded() == 4200, "executed an amount nobody approved")
 }
 

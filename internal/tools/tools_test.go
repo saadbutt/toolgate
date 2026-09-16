@@ -3,7 +3,9 @@ package tools_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/saadbutt/toolgate/internal/tools"
@@ -85,5 +87,32 @@ func TestValidationErrorNamesTheField(t *testing.T) {
 	}
 	if ve.Field != "amount_cents" || !strings.Contains(ve.Reason, "1000") {
 		t.Fatalf("unhelpful error for a retrying agent: %+v", ve)
+	}
+}
+
+// TestRegistryIsSafeForConcurrentUse registers tools while other goroutines
+// look them up. The caller keeps the registry it handed to the gate, so this
+// is reachable at runtime. Run it under -race.
+func TestRegistryIsSafeForConcurrentUse(t *testing.T) {
+	r := tools.NewRegistry()
+	noop := func(context.Context, tools.Args) (tools.Result, error) { return tools.Result{}, nil }
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("tool-%d", i)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = r.Register(tools.Tool{Name: name, Risk: tools.Read, Handler: noop})
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = r.Lookup(name)
+			_ = r.Names()
+		}()
+	}
+	wg.Wait()
+	if got := len(r.Names()); got != 16 {
+		t.Fatalf("registered %d tools, want 16", got)
 	}
 }
