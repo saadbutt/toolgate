@@ -116,3 +116,30 @@ func TestRegistryIsSafeForConcurrentUse(t *testing.T) {
 		t.Fatalf("registered %d tools, want 16", got)
 	}
 }
+
+// TestToolWithoutARiskCannotBeRegistered covers the forgotten field. A zero
+// Risk used to be Read, which needs no confirmation and no idempotency key.
+func TestToolWithoutARiskCannotBeRegistered(t *testing.T) {
+	r := tools.NewRegistry()
+	err := r.Register(tools.Tool{
+		Name:    "wire_money",
+		Handler: func(context.Context, tools.Args) (tools.Result, error) { return tools.Result{}, nil },
+	})
+	if !errors.Is(err, tools.ErrNoRisk) {
+		t.Fatalf("tool with no declared risk registered: %v", err)
+	}
+}
+
+// TestFieldWithoutATypeCannotBeRegistered covers the same mistake one level
+// down. A zero FieldType used to be String, with no length limit.
+func TestFieldWithoutATypeCannotBeRegistered(t *testing.T) {
+	r := tools.NewRegistry()
+	err := r.Register(tools.Tool{
+		Name: "lookup", Risk: tools.Read,
+		Schema:  tools.Schema{Fields: []tools.Field{{Name: "amount_cents", Required: true}}},
+		Handler: func(context.Context, tools.Args) (tools.Result, error) { return tools.Result{}, nil },
+	})
+	if !errors.Is(err, tools.ErrBadSchema) {
+		t.Fatalf("field with no declared type registered: %v", err)
+	}
+}

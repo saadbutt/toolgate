@@ -171,3 +171,26 @@ func TestToolSetDoesNotShareMemoryWithItsCaller(t *testing.T) {
 		t.Fatalf("tool set changed through a caller's slice: %v", s.Tools.Names())
 	}
 }
+
+// TestPrincipalWithoutAKindHoldsNoAuthority covers the forgotten field. A zero
+// Kind used to be Human: full authority, no scope, no confirmation.
+func TestPrincipalWithoutAKindHoldsNoAuthority(t *testing.T) {
+	forgot := policy.Principal{ID: "forgot-kind", Scope: policy.Scope{Tools: policy.NewToolSet("issue_refund")}}
+	v := engine().Evaluate(policy.Request{
+		Principal: forgot, Tool: consequential(),
+		Args: tools.Args{"amount_cents": int64(1_000_000)}, Now: time.Now(),
+	})
+	if v.Decision != policy.Deny || v.Rule != "unknown_principal_kind" {
+		t.Fatalf("principal with no kind got %v via %s", v.Decision, v.Rule)
+	}
+}
+
+func TestToolWithoutARiskIsDenied(t *testing.T) {
+	v := engine().Evaluate(policy.Request{
+		Principal: policy.Principal{ID: "saad", Kind: policy.Human},
+		Tool:      tools.Tool{Name: "wire_money"}, Now: time.Now(),
+	})
+	if v.Decision != policy.Deny || v.Rule != "unknown_risk" {
+		t.Fatalf("tool with no risk got %v via %s", v.Decision, v.Rule)
+	}
+}

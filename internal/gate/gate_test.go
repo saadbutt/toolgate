@@ -598,6 +598,33 @@ func TestEffectWhoseRecordFailedIsReconciled(t *testing.T) {
 	}
 }
 
+// TestPrincipalWithoutAKindCannotMoveMoney runs the forgotten Kind through
+// the whole gate. It used to be treated as a human acting directly.
+func TestPrincipalWithoutAKindCannotMoveMoney(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	forgot := policy.Principal{ID: "saad"}
+	out, err := h.g.Submit(context.Background(), forgot, gate.Call{
+		Tool:           "issue_refund",
+		Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": 4200, "reason": "manual"},
+		IdempotencyKey: "k-nokind",
+	})
+	if err == nil || out.Status != gate.Refused {
+		t.Fatalf("principal with no kind: %v %v", out.Status, err)
+	}
+	if got := h.bill.TotalRefunded(); got != 0 {
+		t.Fatalf("principal with no kind moved %d cents", got)
+	}
+}
+
+// TestZeroOutcomeDoesNotReadAsExecuted guards the other forgotten field: an
+// Outcome that was never filled in must not claim that a call ran.
+func TestZeroOutcomeDoesNotReadAsExecuted(t *testing.T) {
+	var out gate.Outcome
+	if out.Status != gate.Refused {
+		t.Fatalf("zero outcome reads as %v", out.Status)
+	}
+}
+
 func TestSecretsAreRedactedInTheAuditLog(t *testing.T) {
 	h := newHarness(t, budget.Limits{})
 	h.log.Record(audit.Entry{Tool: "x", Decision: "allow"}, map[string]any{

@@ -17,17 +17,24 @@ import (
 )
 
 // Risk determines how much ceremony a call needs before it can happen.
+//
+// The zero Risk is not a risk class, and a tool that does not declare one
+// cannot be registered. If zero meant Read, a forgotten field would be the
+// class that needs no confirmation and no idempotency key.
 type Risk int
 
 const (
 	// Read cannot change anything. Cheap to allow.
-	Read Risk = iota
+	Read Risk = iota + 1
 	// Write changes internal state but is recoverable.
 	Write
 	// Consequential moves money, sends things to third parties, or is
 	// otherwise not undoable. Never executes without explicit confirmation.
 	Consequential
 )
+
+// Valid reports whether r is one of the declared risk classes.
+func (r Risk) Valid() bool { return r >= Read && r <= Consequential }
 
 func (r Risk) String() string {
 	switch r {
@@ -46,16 +53,22 @@ func (r Risk) String() string {
 //
 // It is deliberately small. A permissive schema language is a place for
 // surprises to hide, and every type here has an obvious validation rule.
+//
+// The zero FieldType is not a type. If zero meant String, a field whose type
+// was forgotten would accept any text.
 type FieldType int
 
 const (
-	String FieldType = iota
+	String FieldType = iota + 1
 	Int
 	Bool
 	// Money is an integer minor unit (cents). Floats are not offered on
 	// purpose: a rounding error in a refund is a real incident.
 	Money
 )
+
+// Valid reports whether t is one of the declared field types.
+func (t FieldType) Valid() bool { return t >= String && t <= Money }
 
 func (t FieldType) String() string {
 	switch t {
@@ -133,6 +146,10 @@ var (
 	// ErrNotIdempotent means a mutating tool was registered without an
 	// idempotency guarantee.
 	ErrNotIdempotent = errors.New("tools: write and consequential tools must be idempotent")
+	// ErrNoRisk means a tool was registered without a valid risk class.
+	ErrNoRisk = errors.New("tools: tool declares no valid risk")
+	// ErrBadSchema means a tool's schema cannot be enforced as written.
+	ErrBadSchema = errors.New("tools: invalid schema")
 )
 
 // Register adds a tool.
@@ -147,6 +164,12 @@ func (r *Registry) Register(t Tool) error {
 	if t.Handler == nil {
 		return fmt.Errorf("tools: %s has no handler", t.Name)
 	}
+	if !t.Risk.Valid() {
+		return fmt.Errorf("%w: %s", ErrNoRisk, t.Name)
+	}
+	if err := t.Schema.check(); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrBadSchema, t.Name, err)
+	}
 	if t.Risk != Read && !t.Idempotent {
 		return fmt.Errorf("%w: %s", ErrNotIdempotent, t.Name)
 	}
@@ -156,6 +179,16 @@ func (r *Registry) Register(t Tool) error {
 		return fmt.Errorf("tools: %s already registered", t.Name)
 	}
 	r.byName[t.Name] = t
+	return nil
+}
+
+// check reports a schema that cannot be enforced as declared.
+func (s Schema) check() error {
+	for _, f := range s.Fields {
+		if !f.Type.Valid() {
+			return fmt.Errorf("field %q declares no valid type", f.Name)
+		}
+	}
 	return nil
 }
 

@@ -17,17 +17,24 @@ import (
 )
 
 // Kind distinguishes the three things that can hold authority.
+//
+// The zero Kind is not a kind, and a principal holding it is refused. If zero
+// meant Human, a principal whose Kind was forgotten would hold full authority
+// with no scope and no confirmation.
 type Kind int
 
 const (
 	// Human acts with their own authority.
-	Human Kind = iota
+	Human Kind = iota + 1
 	// Agent acts with a scoped, expiring subset of a human's authority.
 	Agent
 	// Service is an internal component. It has its own identity and is still
 	// subject to policy, because "internal" is not a security boundary.
 	Service
 )
+
+// Valid reports whether k is one of the declared kinds.
+func (k Kind) Valid() bool { return k >= Human && k <= Service }
 
 func (k Kind) String() string {
 	switch k {
@@ -218,11 +225,27 @@ func (e *Engine) Evaluate(req Request) Verdict {
 
 // DefaultRules is the rule set the demo runs with.
 //
-// Order is the whole design. The expiry and scope checks come before anything
-// that could allow, so there is no path where a later permissive rule rescues
-// a request that should already have been refused.
+// Order is the whole design. The validity, expiry and scope checks come
+// before anything that could allow, so there is no path where a later
+// permissive rule rescues a request that should already have been refused.
 func DefaultRules() []Rule {
 	return []Rule{
+		{
+			Name:   "unknown_principal_kind",
+			Reason: "the principal has no valid kind, so it holds no authority",
+			Then:   Deny,
+			Match: func(r Request) bool {
+				return !r.Principal.Kind.Valid()
+			},
+		},
+		{
+			Name:   "unknown_risk",
+			Reason: "the tool declares no valid risk class",
+			Then:   Deny,
+			Match: func(r Request) bool {
+				return !r.Tool.Risk.Valid()
+			},
+		},
 		{
 			Name:   "expired_grant",
 			Reason: "the agent's capability grant has expired",

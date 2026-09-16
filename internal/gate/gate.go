@@ -28,12 +28,13 @@ import (
 type Status int
 
 const (
+	// Refused means policy, schema or budget said no. It is the zero value,
+	// so an Outcome that was never filled in does not claim a call ran.
+	Refused Status = iota
 	// Executed means the tool ran.
-	Executed Status = iota
+	Executed
 	// AwaitingConfirmation means a pending intent was created instead.
 	AwaitingConfirmation
-	// Refused means policy, schema or budget said no.
-	Refused
 )
 
 func (s Status) String() string {
