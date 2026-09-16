@@ -116,3 +116,64 @@ func TestConcurrentRecordKeepsChainIntact(t *testing.T) {
 		t.Fatalf("concurrent writes broke the chain at %d: %v", bad, err)
 	}
 }
+
+// TestTruncatedLogIsDetected covers the easiest edit to make and the one that
+// looks most like covering something up: deleting the most recent entries.
+// Every remaining link is intact, so only a commitment to the head notices.
+func TestTruncatedLogIsDetected(t *testing.T) {
+	l := audit.New()
+	seed(l, 6)
+	if bad, err := l.Verify(); err != nil {
+		t.Fatalf("clean log failed at %d: %v", bad, err)
+	}
+
+	l.Truncate(1)
+	bad, err := l.Verify()
+	if err == nil {
+		t.Fatal("log with its last entry removed still verified")
+	}
+	if bad != 6 {
+		t.Fatalf("reported entry %d, want 6, the first one missing", bad)
+	}
+}
+
+// TestStoredCopyIsVerifiedAgainstAnAnchoredHead is the deployment shape: the
+// entries are written somewhere, the head is kept somewhere else, and the
+// stored copy is checked against it later.
+func TestStoredCopyIsVerifiedAgainstAnAnchoredHead(t *testing.T) {
+	l := audit.New()
+	seed(l, 6)
+	stored, anchored := l.Entries(), l.Head()
+
+	if bad, err := audit.VerifyChain(stored, anchored); err != nil {
+		t.Fatalf("clean copy failed at %d: %v", bad, err)
+	}
+	if bad, err := audit.VerifyChain(stored[:4], anchored); err == nil || bad != 5 {
+		t.Fatalf("copy missing its last two entries: bad=%d err=%v", bad, err)
+	}
+	if bad, err := audit.VerifyChain(nil, anchored); err == nil || bad != 1 {
+		t.Fatalf("emptied copy: bad=%d err=%v", bad, err)
+	}
+
+	edited := append([]audit.Entry(nil), stored...)
+	edited[2].Principal = "someone-else"
+	if bad, err := audit.VerifyChain(edited, anchored); err == nil || bad != 3 {
+		t.Fatalf("edited copy: bad=%d err=%v", bad, err)
+	}
+
+	// A head that has moved on is not satisfied by an older, intact prefix.
+	seed(l, 1)
+	if _, err := audit.VerifyChain(stored, l.Head()); err == nil {
+		t.Fatal("a copy that stops short of the current head verified")
+	}
+}
+
+func TestEmptyLogVerifies(t *testing.T) {
+	l := audit.New()
+	if bad, err := l.Verify(); err != nil {
+		t.Fatalf("empty log failed at %d: %v", bad, err)
+	}
+	if h := l.Head(); h.Count != 0 || h.Hash != strings.Repeat("0", 64) {
+		t.Fatalf("empty log head is %+v", h)
+	}
+}

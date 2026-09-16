@@ -462,10 +462,9 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 		t.Fatalf("clean log failed verification at %d: %v", bad, err)
 	}
 
-	if !h.log.Tamper(2, func(e *audit.Entry) { e.Outcome = "ok (definitely fine)" }) {
-		t.Fatal("could not find entry 2")
-	}
-	bad, err := h.log.Verify()
+	stored, head := h.log.Entries(), h.log.Head()
+	stored[1].Outcome = "ok (definitely fine)"
+	bad, err := audit.VerifyChain(stored, head)
 	if err == nil {
 		t.Fatal("edited log still verified")
 	}

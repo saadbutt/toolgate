@@ -338,29 +338,40 @@ func auditTamper(r *rig) error {
 		IdempotencyKey: "demo-7",
 	})
 
-	say("audit log holds %d entries", r.log.Len())
-	if bad, err := r.log.Verify(); err != nil {
+	stored, head := r.log.Entries(), r.log.Head()
+	say("audit log holds %d entries, written to storage.", len(stored))
+	say("its head is kept somewhere else: count=%d last=%s", head.Count, head.Hash[:16])
+	if bad, err := audit.VerifyChain(stored, head); err != nil {
 		return fmt.Errorf("clean log failed at %d: %w", bad, err)
 	}
-	gateSays("chain verifies")
+	gateSays("stored copy verifies against the head")
 
-	before := r.log.Entries()[1]
 	say("")
 	say("entry 2 currently reads: principal=%s tool=%s outcome=%s",
-		before.Principal, before.Tool, before.Outcome)
-	say("someone edits it to blame the human instead of the agent:")
-	r.log.Tamper(2, func(e *audit.Entry) { e.Principal = "saad" })
-	after := r.log.Entries()[1]
+		stored[1].Principal, stored[1].Tool, stored[1].Outcome)
+	say("someone edits the stored copy to blame the human instead of the agent:")
+	edited := append([]audit.Entry(nil), stored...)
+	edited[1].Principal = "saad"
 	say("entry 2 now reads:       principal=%s tool=%s outcome=%s",
-		after.Principal, after.Tool, after.Outcome)
-	say("")
-
-	bad, err := r.log.Verify()
+		edited[1].Principal, edited[1].Tool, edited[1].Outcome)
+	bad, err := audit.VerifyChain(edited, head)
 	gateSays("verification: %v", err)
 	say("first broken entry: %d", bad)
+	if err := expect(err != nil && bad == 2, "edit was not detected"); err != nil {
+		return err
+	}
+
 	say("")
-	say("this is tamper-evident, not tamper-proof. someone who can rewrite the")
-	say("whole log can rewrite the whole chain. partial edits, which is what")
+	last := stored[len(stored)-1]
+	outcome, _, _ := strings.Cut(last.Outcome, ":")
+	say("so they delete the last entry instead (%s %s). every remaining link holds:", last.Tool, outcome)
+	bad, err = audit.VerifyChain(stored[:len(stored)-1], head)
+	gateSays("verification: %v", err)
+	say("first missing entry: %d", bad)
+	say("")
+	say("this is tamper-evident, not tamper-proof. the head only helps when it is")
+	say("kept where the person editing the log cannot reach it, and someone who can")
+	say("rewrite both can rewrite the whole chain. partial edits, which is what")
 	say("covering something up actually looks like, do not survive.")
-	return expect(err != nil && bad == 2, "edit was not detected")
+	return expect(err != nil && bad == head.Count, "truncation was not detected")
 }

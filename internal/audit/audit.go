@@ -1,11 +1,17 @@
 // Package audit is an append-only log whose history cannot be quietly edited.
 //
 // Each entry carries the hash of the entry before it, so changing anything in
-// the middle breaks every hash after it. That is not the same as tamper-proof,
-// and the README says so: without an external anchor, someone who can rewrite
-// the whole file can rewrite the whole chain. It does mean that partial
-// editing, which is what actually happens when someone is covering something
-// up, is detectable.
+// the middle breaks every hash after it. Links alone cannot see the tail being
+// cut off, because every remaining link is still intact, so the log also keeps
+// a Head: the entry count and the hash of the last entry. Verifying against a
+// head detects truncation.
+//
+// That is not the same as tamper-proof, and the README says so. A head kept
+// next to the entries can be rewritten along with them; it only protects the
+// log when it is stored somewhere the person editing the log cannot reach.
+// Without that anchor, someone who can rewrite the whole file can rewrite the
+// whole chain. What it does mean is that partial editing, which is what
+// actually happens when someone is covering something up, is detectable.
 package audit
 
 import (
@@ -35,10 +41,22 @@ type Entry struct {
 	Hash      string    `json:"hash"`
 }
 
+// Head commits to a whole log: how many entries it holds and the hash of the
+// last one. Publishing or storing it elsewhere is what makes deleting recent
+// entries detectable.
+type Head struct {
+	Count uint64 `json:"count"`
+	Hash  string `json:"hash"`
+}
+
+// genesis is the PrevHash of the first entry and the Hash of an empty log.
+var genesis = strings.Repeat("0", 64)
+
 // Log is a hash-chained sequence of entries. Safe for concurrent use.
 type Log struct {
 	mu      sync.Mutex
 	entries []Entry
+	head    Head
 	now     func() time.Time
 	// redact holds field names whose values are replaced before writing.
 	redact map[string]bool
@@ -51,7 +69,8 @@ type Log struct {
 // the same line has made things worse, not better.
 func New() *Log {
 	return &Log{
-		now: time.Now,
+		head: Head{Hash: genesis},
+		now:  time.Now,
 		redact: map[string]bool{
 			"password": true, "token": true, "secret": true,
 			"api_key": true, "apikey": true, "authorization": true,
@@ -79,17 +98,14 @@ func (l *Log) Record(e Entry, args map[string]any) Entry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	e.Seq = uint64(len(l.entries)) + 1
+	e.Seq = l.head.Count + 1
 	e.Time = l.now().UTC()
 	e.Args = l.renderArgs(args)
-	if len(l.entries) > 0 {
-		e.PrevHash = l.entries[len(l.entries)-1].Hash
-	} else {
-		e.PrevHash = strings.Repeat("0", 64)
-	}
+	e.PrevHash = l.head.Hash
 	e.Hash = hashEntry(e)
 
 	l.entries = append(l.entries, e)
+	l.head = Head{Count: e.Seq, Hash: e.Hash}
 	return e
 }
 
@@ -100,6 +116,13 @@ func (l *Log) Entries() []Entry {
 	return append([]Entry(nil), l.entries...)
 }
 
+// Head returns the log's current commitment to its length and last entry.
+func (l *Log) Head() Head {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.head
+}
+
 // Len reports how many entries are held.
 func (l *Log) Len() int {
 	l.mu.Lock()
@@ -107,7 +130,7 @@ func (l *Log) Len() int {
 	return len(l.entries)
 }
 
-// Verify walks the chain and reports the first entry that does not hold.
+// Verify walks the chain and checks it against the log's head.
 //
 // It returns the sequence number rather than just an error because "the log
 // is broken" is far less useful during an incident than "the log is broken
@@ -115,9 +138,20 @@ func (l *Log) Len() int {
 func (l *Log) Verify() (badSeq uint64, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return VerifyChain(l.entries, l.head)
+}
 
-	prev := strings.Repeat("0", 64)
-	for _, e := range l.entries {
+// VerifyChain checks entries read back from storage against a head kept
+// somewhere else, and reports the first entry that does not hold.
+//
+// Edits, reordering and deletions in the middle break a link. Deleting the
+// most recent entries breaks no link at all, which is why the head is
+// required: the walk has to end at exactly the entry the head names. When
+// entries are missing from the end, the first missing sequence number is
+// reported.
+func VerifyChain(entries []Entry, head Head) (badSeq uint64, err error) {
+	prev := genesis
+	for _, e := range entries {
 		if e.PrevHash != prev {
 			return e.Seq, fmt.Errorf("audit: entry %d does not follow entry %d", e.Seq, e.Seq-1)
 		}
@@ -126,24 +160,17 @@ func (l *Log) Verify() (badSeq uint64, err error) {
 		}
 		prev = e.Hash
 	}
-	return 0, nil
-}
 
-// Tamper edits a stored entry in place without repairing the chain.
-//
-// This exists so the demo and the tests can show detection working. It is the
-// only way to modify history through this API, it is named so that nobody
-// calls it by accident, and nothing in the request path references it.
-func (l *Log) Tamper(seq uint64, mutate func(*Entry)) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for i := range l.entries {
-		if l.entries[i].Seq == seq {
-			mutate(&l.entries[i])
-			return true
-		}
+	n := uint64(len(entries))
+	switch {
+	case n < head.Count:
+		return n + 1, fmt.Errorf("audit: log ends at entry %d but the head commits to %d entries", n, head.Count)
+	case n > head.Count:
+		return head.Count + 1, fmt.Errorf("audit: log has %d entries but the head commits to %d", n, head.Count)
+	case prev != head.Hash:
+		return n, fmt.Errorf("audit: last entry %d does not match the head", n)
 	}
-	return false
+	return 0, nil
 }
 
 func (l *Log) renderArgs(args map[string]any) string {
