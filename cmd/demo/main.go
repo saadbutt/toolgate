@@ -41,8 +41,8 @@ func main() {
 		{"Retrieved document tries to escalate", injectionContained},
 		{"Approval token replayed", tokenReplay},
 		{"Arguments swapped after approval", argTamper},
-		{"Agent loops on a failing call", runawayLoop},
-		{"Audit log edited by hand", auditTamper},
+		{"Agent loops on a malformed call", runawayLoop},
+		{"Audit log edited or cut short", auditTamper},
 	}
 
 	failed := 0
