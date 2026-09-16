@@ -109,3 +109,94 @@ func TestFailedCallIsNotRetriedUnderSameKey(t *testing.T) {
 		t.Fatalf("handler ran %d times", hits.Load())
 	}
 }
+
+// TestReconcileWritesEachRecordOnce covers overlapping reconcile passes, and a
+// pass that starts while the first write is still in progress. Either would
+// otherwise pick up the same applied call and record it twice.
+func TestReconcileWritesEachRecordOnce(t *testing.T) {
+	var hits atomic.Int64
+	var writes atomic.Int64
+	var recordOK atomic.Bool
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var inFlight atomic.Int64
+	e := exec.New(func(exec.Record) error {
+		writes.Add(1)
+		if !recordOK.Load() {
+			return errors.New("database unavailable")
+		}
+		if inFlight.Add(1) > 1 {
+			// A second write while the first is still going is the bug.
+			// Return rather than block, so the test fails instead of hanging.
+			inFlight.Add(-1)
+			return nil
+		}
+		defer inFlight.Add(-1)
+		once.Do(func() { close(started) })
+		<-release
+		return nil
+	})
+
+	// The first attempt fails, leaving one applied call.
+	if _, _, err := e.Do(context.Background(), "k", counterTool(&hits, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	recordOK.Store(true)
+
+	var fixed atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, _ := e.Reconcile()
+			fixed.Add(int64(n))
+		}()
+	}
+	<-started
+	// One write is in progress. Every other pass must see nothing to do.
+	for i := 0; i < 8; i++ {
+		if n, _ := e.Reconcile(); n != 0 {
+			t.Errorf("a pass re-recorded a call whose write was in progress")
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("recorder called %d times, want 2: one failure and one reconcile", got)
+	}
+	if fixed.Load() != 1 {
+		t.Fatalf("reconcile passes fixed %d in total, want 1", fixed.Load())
+	}
+	if st, _ := e.State("k"); st != exec.Recorded {
+		t.Fatalf("state is %v, want recorded", st)
+	}
+}
+
+// TestInFlightRecordIsNotReportedAsUnrecorded covers the window between the
+// effect landing and its first write finishing. That call has not failed to
+// record, so a reconcile pass must leave it alone.
+func TestInFlightRecordIsNotReportedAsUnrecorded(t *testing.T) {
+	var hits atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	e := exec.New(func(exec.Record) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = e.Do(context.Background(), "k", counterTool(&hits, nil), nil)
+	}()
+	<-started
+	if un := e.Unrecorded(); len(un) != 0 {
+		t.Errorf("a write still in progress was listed as unrecorded: %+v", un)
+	}
+	close(release)
+	<-done
+}

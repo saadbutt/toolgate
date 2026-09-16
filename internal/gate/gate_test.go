@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -536,6 +537,64 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 	}
 	if bad != 2 {
 		t.Fatalf("detected tampering at entry %d, want 2", bad)
+	}
+}
+
+// TestEffectWhoseRecordFailedIsReconciled wires the audit log to storage that
+// fails on demand. The refund happens and its record does not. The gate must
+// say so, and Reconcile must write the record once storage is back without
+// moving the money again.
+func TestEffectWhoseRecordFailedIsReconciled(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	ctx := context.Background()
+	var down atomic.Bool
+	h.log.SetSink(func(audit.Entry) error {
+		if down.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+
+	out, _ := h.g.Submit(ctx, agent(fullScope()), gate.Call{
+		Tool:           "issue_refund",
+		Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": 4200, "reason": "duplicate charge"},
+		IdempotencyKey: "k-rec",
+	})
+	down.Store(true)
+	done, err := h.g.ConfirmAndRun(ctx, human(), out.Intent.ID, out.Token, "k-rec-c")
+	if err != nil || done.Status != gate.Executed {
+		t.Fatalf("the refund landed, so the call succeeded: %v %v", done.Status, err)
+	}
+	if got := h.bill.TotalRefunded(); got != 4200 {
+		t.Fatalf("refunded %d, want 4200", got)
+	}
+
+	un := h.g.Unrecorded()
+	if len(un) != 1 || un[0].Key != "k-rec-c" {
+		t.Fatalf("unrecorded effects: %+v, want the one refund", un)
+	}
+	if fixed, err := h.g.Reconcile(); err == nil || fixed != 0 {
+		t.Fatalf("reconcile claimed %d fixed while storage was down (err %v)", fixed, err)
+	}
+
+	down.Store(false)
+	if fixed, err := h.g.Reconcile(); err != nil || fixed != 1 {
+		t.Fatalf("reconcile fixed %d, err %v", fixed, err)
+	}
+	if un := h.g.Unrecorded(); len(un) != 0 {
+		t.Fatalf("still unrecorded after reconcile: %+v", un)
+	}
+	var found bool
+	for _, e := range h.log.Entries() {
+		if e.Rule == "exec_record" && strings.Contains(e.Args, "k-rec-c") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("reconcile did not write the execution record")
+	}
+	if got := h.bill.TotalRefunded(); got != 4200 {
+		t.Fatalf("reconcile moved money again: %d", got)
 	}
 }
 

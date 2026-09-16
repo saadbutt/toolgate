@@ -115,20 +115,31 @@ func New(reg *tools.Registry, pol *policy.Engine, bud *budget.Ledger, conf *conf
 		now:        time.Now,
 		requesters: make(map[string]requester),
 	}
+	// The executor's record of an effect is the one entry that must not be
+	// lost, so a failed write is handed back. The executor then holds the call
+	// as applied but unrecorded until Reconcile writes it.
 	g.exec = exec.New(func(rec exec.Record) error {
-		log.Record(audit.Entry{
+		_, err := log.Record(audit.Entry{
 			Tool:     rec.Tool,
 			Decision: "executed",
 			Rule:     "exec_record",
-			Outcome:  rec.State.String(),
+			Outcome:  "applied",
 		}, map[string]any{"idempotency_key": rec.Key})
-		return nil
+		return err
 	})
 	return g
 }
 
 // SetClock replaces the time source for tests.
 func (g *Gate) SetClock(f func() time.Time) { g.now = f }
+
+// Unrecorded lists executed calls whose effect happened but whose audit record
+// could not be written.
+func (g *Gate) Unrecorded() []exec.Record { return g.exec.Unrecorded() }
+
+// Reconcile retries the audit record for every call Unrecorded lists. Run it
+// on a timer, and whenever storage comes back.
+func (g *Gate) Reconcile() (fixed int, err error) { return g.exec.Reconcile() }
 
 var (
 	// ErrMissingIdempotencyKey means a mutating call arrived without a key.
@@ -321,8 +332,13 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, approver policy.Principal, int
 	}, nil
 }
 
+// record writes a decision to the audit log.
+//
+// A failed write here is not retried. The refusal or pending intent it
+// describes stands either way, and an executed effect also has the executor's
+// own record, which Reconcile does retry. The README lists this as a limit.
 func (g *Gate) record(p policy.Principal, tool string, args tools.Args, v policy.Verdict, outcome, model string) {
-	g.audit.Record(audit.Entry{
+	_, _ = g.audit.Record(audit.Entry{
 		Principal: p.ID,
 		Actor:     p.Kind.String(),
 		Tool:      tool,

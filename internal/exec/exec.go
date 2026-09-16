@@ -70,6 +70,9 @@ type Recorder func(rec Record) error
 type Executor struct {
 	mu      sync.Mutex
 	records map[string]*Record
+	// writing holds keys whose record is being written right now. Nothing
+	// else may start writing them, or the same effect is recorded twice.
+	writing map[string]bool
 	record  Recorder
 	now     func() time.Time
 }
@@ -81,6 +84,7 @@ func New(record Recorder) *Executor {
 	}
 	return &Executor{
 		records: make(map[string]*Record),
+		writing: make(map[string]bool),
 		record:  record,
 		now:     time.Now,
 	}
@@ -133,29 +137,32 @@ func (e *Executor) Do(ctx context.Context, key string, t tools.Tool, args tools.
 	// remember it, so the state moves to Applied before recording is tried.
 	rec.State = Applied
 	rec.Result = res
+	e.writing[key] = true
 	snapshot := *rec
 	e.mu.Unlock()
 
-	if rerr := e.record(snapshot); rerr != nil {
-		// Deliberately not rolled back. The effect is real and pretending
-		// otherwise would be a lie with financial consequences. It stays
-		// Applied for Reconcile to finish.
-		return res, false, nil
-	}
+	rerr := e.record(snapshot)
 
 	e.mu.Lock()
-	rec.State = Recorded
+	delete(e.writing, key)
+	// A failed write is deliberately not rolled back. The effect is real and
+	// pretending otherwise would be a lie with financial consequences. It
+	// stays Applied for Reconcile to finish.
+	if rerr == nil {
+		rec.State = Recorded
+	}
 	e.mu.Unlock()
 	return res, false, nil
 }
 
-// Unrecorded lists calls whose effect happened but whose record did not.
+// Unrecorded lists calls whose effect happened but whose record did not. A
+// call whose write is still in progress has not failed yet and is not listed.
 func (e *Executor) Unrecorded() []Record {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []Record
-	for _, r := range e.records {
-		if r.State == Applied {
+	for key, r := range e.records {
+		if r.State == Applied && !e.writing[key] {
 			out = append(out, *r)
 		}
 	}
@@ -167,20 +174,36 @@ func (e *Executor) Unrecorded() []Record {
 // This is the pass that a real deployment runs on a timer and after every
 // restart. It is not a nicety; without it the Applied state accumulates
 // silently and the audit log is quietly incomplete.
+//
+// Each call is claimed before it is written, so passes that overlap, or that
+// start while Do is still writing, never record the same effect twice.
 func (e *Executor) Reconcile() (fixed int, err error) {
-	for _, r := range e.Unrecorded() {
-		if rerr := e.record(r); rerr != nil {
-			err = fmt.Errorf("exec: reconciling %s: %w", r.Key, rerr)
-			continue
+	e.mu.Lock()
+	var claimed []Record
+	for key, r := range e.records {
+		if r.State == Applied && !e.writing[key] {
+			e.writing[key] = true
+			claimed = append(claimed, *r)
 		}
+	}
+	e.mu.Unlock()
+
+	var errs []error
+	for _, r := range claimed {
+		rerr := e.record(r)
 		e.mu.Lock()
-		if live, ok := e.records[r.Key]; ok {
-			live.State = Recorded
+		delete(e.writing, r.Key)
+		if rerr == nil {
+			e.records[r.Key].State = Recorded
 		}
 		e.mu.Unlock()
+		if rerr != nil {
+			errs = append(errs, fmt.Errorf("exec: reconciling %s: %w", r.Key, rerr))
+			continue
+		}
 		fixed++
 	}
-	return fixed, err
+	return fixed, errors.Join(errs...)
 }
 
 // State reports where a key got to.

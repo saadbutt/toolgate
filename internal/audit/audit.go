@@ -49,6 +49,10 @@ type Head struct {
 	Hash  string `json:"hash"`
 }
 
+// Sink writes an entry to durable storage. It is called in sequence order,
+// under the log's lock, before the entry joins the chain.
+type Sink func(Entry) error
+
 // genesis is the PrevHash of the first entry and the Hash of an empty log.
 var genesis = strings.Repeat("0", 64)
 
@@ -57,6 +61,7 @@ type Log struct {
 	mu      sync.Mutex
 	entries []Entry
 	head    Head
+	sink    Sink
 	now     func() time.Time
 	// redact holds field names whose values are replaced before writing.
 	redact map[string]bool
@@ -86,6 +91,15 @@ func (l *Log) SetClock(f func() time.Time) {
 	l.now = f
 }
 
+// SetSink sets where entries are written before they join the chain.
+//
+// Without a sink the log lives only in memory, and Record cannot fail.
+func (l *Log) SetSink(s Sink) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sink = s
+}
+
 // Redact adds a field name to the redaction set.
 func (l *Log) Redact(field string) {
 	l.mu.Lock()
@@ -94,7 +108,11 @@ func (l *Log) Redact(field string) {
 }
 
 // Record appends an entry and returns it as written.
-func (l *Log) Record(e Entry, args map[string]any) Entry {
+//
+// An entry joins the chain only once the sink has accepted it. A failed write
+// leaves the log exactly as it was, so the chain never holds an entry that
+// storage does not, and the same record can be tried again.
+func (l *Log) Record(e Entry, args map[string]any) (Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -103,10 +121,15 @@ func (l *Log) Record(e Entry, args map[string]any) Entry {
 	e.Args = l.renderArgs(args)
 	e.PrevHash = l.head.Hash
 	e.Hash = hashEntry(e)
+	if l.sink != nil {
+		if err := l.sink(e); err != nil {
+			return Entry{}, fmt.Errorf("audit: writing entry %d: %w", e.Seq, err)
+		}
+	}
 
 	l.entries = append(l.entries, e)
 	l.head = Head{Count: e.Seq, Hash: e.Hash}
-	return e
+	return e, nil
 }
 
 // Entries returns a copy of the log.

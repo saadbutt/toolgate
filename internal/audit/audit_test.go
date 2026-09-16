@@ -1,6 +1,7 @@
 package audit_test
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -175,5 +176,40 @@ func TestEmptyLogVerifies(t *testing.T) {
 	}
 	if h := l.Head(); h.Count != 0 || h.Hash != strings.Repeat("0", 64) {
 		t.Fatalf("empty log head is %+v", h)
+	}
+}
+
+// TestFailedWriteLeavesTheLogUnchanged covers storage refusing a write. The
+// entry must not join the chain, or the log would claim a record that
+// storage does not hold, and a retry must produce a clean chain.
+func TestFailedWriteLeavesTheLogUnchanged(t *testing.T) {
+	l := audit.New()
+	var stored []audit.Entry
+	down := false
+	l.SetSink(func(e audit.Entry) error {
+		if down {
+			return errors.New("disk full")
+		}
+		stored = append(stored, e)
+		return nil
+	})
+	seed(l, 2)
+	head := l.Head()
+
+	down = true
+	if _, err := l.Record(audit.Entry{Tool: "t", Outcome: "ok"}, nil); err == nil {
+		t.Fatal("a failed write was reported as recorded")
+	}
+	if l.Len() != 2 || l.Head() != head {
+		t.Fatalf("failed write changed the log: len=%d head=%+v", l.Len(), l.Head())
+	}
+
+	down = false
+	e, err := l.Record(audit.Entry{Tool: "t", Outcome: "ok"}, nil)
+	if err != nil || e.Seq != 3 {
+		t.Fatalf("retry: seq=%d err=%v", e.Seq, err)
+	}
+	if bad, err := audit.VerifyChain(stored, l.Head()); err != nil {
+		t.Fatalf("what storage holds does not verify, from %d: %v", bad, err)
 	}
 }
