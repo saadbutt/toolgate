@@ -4,7 +4,7 @@ import { canonicalize, hashArgs, type Args } from "../src/canonical.ts";
 
 describe("canonical encoding", () => {
   // These are the same fixtures asserted in internal/confirm/canonical_test.go.
-  // If either implementation drifts, one of the two suites fails.
+  // If either implementation drifts on one of these cases, one suite fails.
   const goFixtures: Array<{ name: string; args: Args; hash: string }> = [
     {
       name: "typical refund",
@@ -26,6 +26,21 @@ describe("canonical encoding", () => {
       args: { flag: true, empty: "" },
       hash: "d726b9c4e59b06b8918a6d61ed472b5cef8bb797aaa99c3d3b4d8dc428b7f852",
     },
+    {
+      name: "line and paragraph separators",
+      args: { reason: "pasted\u2028from a pdf\u2029end", n: 1 },
+      hash: "3720098229543bfb785c62aee8e0f39dff64a38cb9d60e083a875475051bc38a",
+    },
+    {
+      name: "non-ascii text",
+      args: { customer: "Café Zürich", note: "☕ 日本 😀" },
+      hash: "4553c0ec725a4436946d0b375aa8d4c2a4a23d899db6a0b142add410b79db150",
+    },
+    {
+      name: "control characters",
+      args: { note: "tab\tline\nreturn\rback\bfeed\fnul\u0000unit\u001f" },
+      hash: "e7c038839695a31799b03ef8f5e11b6a4cf477d26875e34a21ea9255ebef9a7c",
+    },
   ];
 
   for (const f of goFixtures) {
@@ -45,6 +60,8 @@ describe("canonical encoding", () => {
     // The difference that silently breaks a naive port. JSON.stringify leaves
     // these alone; Go does not.
     assert.equal(canonicalize({ s: "a<b&c>d" }), '{"s":"a\\u003cb\\u0026c\\u003ed"}');
+    // Go also escapes the line and paragraph separators, always.
+    assert.equal(canonicalize({ s: "a\u2028b\u2029c" }), '{"s":"a\\u2028b\\u2029c"}');
   });
 
   test("emits no whitespace", () => {

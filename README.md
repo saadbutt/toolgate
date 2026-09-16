@@ -129,9 +129,7 @@ node --experimental-strip-types --test test/*.test.ts
 
 Node 22.6 or newer, no build step, no dependencies.
 
-Both test suites assert the same pinned hashes, so a change that breaks one of those fixtures fails a test. Getting them to agree required matching one non-obvious behaviour: Go's `encoding/json` escapes `<`, `>` and `&` by default and `JSON.stringify` does not, so a naive port agrees on everything until an argument contains an ampersand.
-
-The fixtures do not cover everything, and the encoders have already drifted once: Go also escapes U+2028 and U+2029, and the TypeScript encoder does not, so a string containing either hashes differently on the two sides.
+Both test suites pin the same fixture hashes, so a change to either encoder that affects one of those cases fails a test. Getting them to agree required matching two non-obvious behaviours, both places where Go's `encoding/json` escapes and `JSON.stringify` does not: `<`, `>` and `&`, which a naive port gets wrong as soon as an argument contains an ampersand, and the line and paragraph separators U+2028 and U+2029, which arrive in text pasted from PDFs. The first port missed the separators and the fixtures did not notice, so they are pinned now, along with non-ASCII text and control characters.
 
 ## Tests
 

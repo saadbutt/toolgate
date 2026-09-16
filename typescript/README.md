@@ -3,7 +3,7 @@
 The one piece of [toolgate](../) most worth having in your own stack, ported to TypeScript.
 
 ```
-node --experimental-strip-types --test test/*.test.ts   # 25 tests
+node --experimental-strip-types --test test/*.test.ts   # 28 tests
 node --experimental-strip-types src/demo.ts             # the demo
 ```
 
@@ -48,11 +48,16 @@ The same token is presented again
 
 ## Cross-language parity
 
-`hashArgs` here and `confirm.HashArgs` in the Go implementation produce identical hashes for identical arguments. Both test suites assert the same four fixtures, so if either encoder drifts, one of them fails.
+`hashArgs` here and `confirm.HashArgs` in the Go implementation produce identical hashes for identical arguments. Both test suites pin the same seven fixtures, covering HTML-sensitive characters, line and paragraph separators, non-ASCII text and control characters, so a change to either encoder that affects one of those cases fails a test.
 
 That matters in practice: an agent runtime in TypeScript and an approval service in Go have to agree on what was approved, byte for byte.
 
-Getting it to match took one non-obvious thing. Go's `encoding/json` escapes `<`, `>` and `&` to `<`, `>` and `&` by default. `JSON.stringify` does not. Everything agrees until an argument contains an ampersand, and then the hashes silently diverge. See `src/canonical.ts`.
+Getting it to match took two non-obvious things, both places where Go's `encoding/json` escapes and `JSON.stringify` does not:
+
+- `<`, `>` and `&` become `\u003c`, `\u003e` and `\u0026`. Everything agrees until an argument contains an ampersand.
+- U+2028 and U+2029, the line and paragraph separators, become `\u2028` and `\u2029`. These arrive in ordinary text pasted from PDFs and web pages. The first version of this port missed them, and the fixtures at the time did not notice, which is why they are pinned now.
+
+See `src/canonical.ts`.
 
 Two other decisions, both to keep the implementations honest with each other:
 

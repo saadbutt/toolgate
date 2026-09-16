@@ -43,6 +43,26 @@ func TestCanonicalHashesAreStable(t *testing.T) {
 			args: tools.Args{"flag": true, "empty": ""},
 			want: "d726b9c4e59b06b8918a6d61ed472b5cef8bb797aaa99c3d3b4d8dc428b7f852",
 		},
+		{
+			// Go's encoder also escapes U+2028 and U+2029, which JSON.stringify
+			// emits raw. Text pasted from a PDF or a web page carries them.
+			name: "line and paragraph separators",
+			args: tools.Args{"reason": "pasted\u2028from a pdf\u2029end", "n": int64(1)},
+			want: "3720098229543bfb785c62aee8e0f39dff64a38cb9d60e083a875475051bc38a",
+		},
+		{
+			// Everything else outside ASCII is written as raw UTF-8 on both sides.
+			name: "non-ascii text",
+			args: tools.Args{"customer": "Café Zürich", "note": "☕ 日本 😀"},
+			want: "4553c0ec725a4436946d0b375aa8d4c2a4a23d899db6a0b142add410b79db150",
+		},
+		{
+			// Short escapes for \b and \f, \u00XX for the rest. Go before 1.22
+			// wrote \u0008 and \u000c, so this pins the encoder version too.
+			name: "control characters",
+			args: tools.Args{"note": "tab\tline\nreturn\rback\bfeed\fnul\u0000unit\u001f"},
+			want: "e7c038839695a31799b03ef8f5e11b6a4cf477d26875e34a21ea9255ebef9a7c",
+		},
 	}
 
 	for _, tc := range cases {

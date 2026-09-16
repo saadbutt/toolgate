@@ -23,15 +23,22 @@ export type Args = Record<string, ArgValue>;
 /**
  * Encodes args the way Go's encoding/json does for a map[string]any.
  *
- * Three behaviours have to match exactly:
+ * Four behaviours have to match exactly:
  *
  *  1. Object keys are sorted. Go sorts map keys; JavaScript preserves
  *     insertion order, so sorting has to be explicit here.
  *  2. No whitespace between tokens.
- *  3. `<`, `>` and `&` are escaped to <, > and &. Go does this
- *     by default to keep output safe to embed in HTML. JSON.stringify does
- *     not, and this is the difference that silently breaks a naive port:
+ *  3. `<`, `>` and `&` are escaped to \u003c, \u003e and \u0026. Go does
+ *     this by default to keep output safe to embed in HTML. JSON.stringify
+ *     does not, and this is the difference that silently breaks a naive port:
  *     everything agrees until an argument contains an ampersand.
+ *  4. U+2028 and U+2029, the line and paragraph separators, are escaped to
+ *     \u2028 and \u2029. Go always does this; JSON.stringify emits them raw.
+ *     They arrive in ordinary text pasted from PDFs and web pages.
+ *
+ * Everything else JSON.stringify already writes the way Go does: control
+ * characters, quotes and backslashes are escaped identically, and all other
+ * well-formed non-ASCII text is raw UTF-8. The pinned fixtures cover each case.
  */
 export function canonicalize(args: Args): string {
   const keys = Object.keys(args).sort();
@@ -73,14 +80,16 @@ function encodeValue(v: ArgValue, key: string): string {
   }
 }
 
-const htmlEscapes: Record<string, string> = {
+const goEscapes: Record<string, string> = {
   "<": "\\u003c",
   ">": "\\u003e",
   "&": "\\u0026",
+  "\u2028": "\\u2028",
+  "\u2029": "\\u2029",
 };
 
 function encodeString(s: string): string {
-  return JSON.stringify(s).replace(/[<>&]/g, (c) => htmlEscapes[c] ?? c);
+  return JSON.stringify(s).replace(/[<>&\u2028\u2029]/g, (c) => goEscapes[c] ?? c);
 }
 
 /** Returns the hex sha256 of the canonical encoding of args. */
