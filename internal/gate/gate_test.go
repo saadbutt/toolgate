@@ -150,6 +150,101 @@ func TestArgumentTamperingBetweenConfirmAndExecuteIsRejected(t *testing.T) {
 	}
 }
 
+// TestGrantExpiringBeforeConfirmationStopsExecution covers the gap between
+// two clocks: the intent is still inside its TTL, but the grant it was
+// requested under has lapsed. The approval must not outlive the authority.
+func TestGrantExpiringBeforeConfirmationStopsExecution(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	ctx := context.Background()
+	now := time.Now()
+	h.g.SetClock(func() time.Time { return now })
+
+	short := fullScope()
+	short.ExpiresAt = now.Add(time.Second)
+	out, err := h.g.Submit(ctx, agent(short), gate.Call{
+		Tool:           "issue_refund",
+		Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": 4200, "reason": "duplicate charge"},
+		IdempotencyKey: "k-exp",
+	})
+	if err != nil || out.Status != gate.AwaitingConfirmation {
+		t.Fatalf("submit: %v %v", out.Status, err)
+	}
+
+	now = now.Add(2 * time.Second)
+	done, err := h.g.ConfirmAndRun(ctx, human(), out.Intent.ID, out.Token, "k-exp-c")
+	if err == nil || done.Status != gate.Refused {
+		t.Fatalf("confirmed after the grant expired: %v %v", done.Status, err)
+	}
+	if done.Verdict.Rule != "expired_grant" {
+		t.Fatalf("refused by %q, want expired_grant", done.Verdict.Rule)
+	}
+	if got := h.bill.TotalRefunded(); got != 0 {
+		t.Fatalf("expired grant moved %d cents", got)
+	}
+}
+
+// TestAgentWithoutAHumanCannotBeItsOwnApprover covers the fallback that
+// named the requesting agent as the approver when it acted for no one.
+func TestAgentWithoutAHumanCannotBeItsOwnApprover(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	orphan := policy.Principal{ID: "agent-1", Kind: policy.Agent, Scope: fullScope()}
+
+	out, err := h.g.Submit(context.Background(), orphan, gate.Call{
+		Tool:           "issue_refund",
+		Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": 4200, "reason": "duplicate charge"},
+		IdempotencyKey: "k-orphan",
+	})
+	if !errors.Is(err, gate.ErrNoApprover) || out.Status != gate.Refused {
+		t.Fatalf("got %v %v, want refused with ErrNoApprover", out.Status, err)
+	}
+	if out.Intent != nil || out.Token != "" {
+		t.Fatal("an intent was created with no human to approve it")
+	}
+}
+
+// TestOnlyAHumanCanConfirm presents the right id and token under the right
+// approver name, from a principal that is not a human. The refusal must not
+// burn the intent, or anyone could cancel a real approval.
+func TestOnlyAHumanCanConfirm(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	ctx := context.Background()
+	out, _ := h.g.Submit(ctx, agent(fullScope()), gate.Call{
+		Tool:           "issue_refund",
+		Args:           tools.Args{"invoice_id": "INV-1001", "amount_cents": 4200, "reason": "duplicate charge"},
+		IdempotencyKey: "k-kind",
+	})
+
+	impostor := policy.Principal{ID: "saad", Kind: policy.Agent}
+	if _, err := h.g.ConfirmAndRun(ctx, impostor, out.Intent.ID, out.Token, "k-kind-a"); !errors.Is(err, gate.ErrApproverNotHuman) {
+		t.Fatalf("non-human approver: got %v", err)
+	}
+	if got := h.bill.TotalRefunded(); got != 0 {
+		t.Fatalf("non-human approval moved %d cents", got)
+	}
+	if _, err := h.g.ConfirmAndRun(ctx, human(), out.Intent.ID, out.Token, "k-kind-b"); err != nil {
+		t.Fatalf("the real human could no longer approve: %v", err)
+	}
+}
+
+// TestIntentCreatedOutsideTheGateDoesNotRun covers an intent written straight
+// into the store. No policy ever saw it, so the gate has nothing to
+// re-evaluate and must refuse rather than trust it.
+func TestIntentCreatedOutsideTheGateDoesNotRun(t *testing.T) {
+	h := newHarness(t, budget.Limits{})
+	in, tok, err := h.conf.Create("issue_refund",
+		tools.Args{"invoice_id": "INV-1001", "amount_cents": int64(4200), "reason": "x"},
+		"refund", "agent-1", "saad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.g.ConfirmAndRun(context.Background(), human(), in.ID, tok, "k-side"); !errors.Is(err, gate.ErrUnknownIntent) {
+		t.Fatalf("an intent the gate never created: got %v", err)
+	}
+	if got := h.bill.TotalRefunded(); got != 0 {
+		t.Fatalf("side-loaded intent moved %d cents", got)
+	}
+}
+
 func TestWrongApproverCannotConfirm(t *testing.T) {
 	h := newHarness(t, budget.Limits{})
 	out, _ := h.g.Submit(context.Background(), agent(fullScope()), gate.Call{
