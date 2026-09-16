@@ -126,7 +126,7 @@ func (s *Store) Create(toolName string, args tools.Args, summary, requestedBy, a
 		token:       tokRaw,
 	}
 	s.intents[in.ID] = in
-	return in, hex.EncodeToString(tokRaw), nil
+	return in.copy(), hex.EncodeToString(tokRaw), nil
 }
 
 // Pending returns an intent for display without consuming it.
@@ -137,10 +137,19 @@ func (s *Store) Pending(id string) (*Intent, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
+	return in.copy(), nil
+}
+
+// copy returns a detached view of an intent without its token.
+//
+// Every field on Intent is exported, so handing out the stored pointer would
+// let the holder rewrite the approved arguments, the approver or the tool
+// after the fact. Nothing outside the store ever sees the stored record.
+func (in *Intent) copy() *Intent {
 	cp := *in
 	cp.Args = cloneArgs(in.Args)
 	cp.token = nil
-	return &cp, nil
+	return &cp
 }
 
 // Confirm consumes the intent and returns the frozen arguments.

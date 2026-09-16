@@ -49,6 +49,38 @@ func TestMutatingTheCallersArgsDoesNotChangeTheIntent(t *testing.T) {
 	}
 }
 
+// TestMutatingTheReturnedIntentDoesNotChangeTheStore covers the other alias:
+// the intent Create hands back. If it were the store's own record, whoever
+// requested the action could rewrite the amount, the approver or the tool
+// after a human approved it.
+func TestMutatingTheReturnedIntentDoesNotChangeTheStore(t *testing.T) {
+	s := confirm.NewStore(5 * time.Minute)
+	in, _, err := s.Create("issue_refund",
+		tools.Args{"amount_cents": int64(4200)},
+		"refund $42", "agent-1", "human-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in.Args["amount_cents"] = int64(128000)
+	in.Approver = "agent-1"
+	in.Tool = "wire_money"
+
+	got, err := s.Pending(in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Args["amount_cents"] != int64(4200) {
+		t.Errorf("args mutated through the returned intent: %v", got.Args["amount_cents"])
+	}
+	if got.Approver != "human-1" {
+		t.Errorf("approver mutated through the returned intent: %q", got.Approver)
+	}
+	if got.Tool != "issue_refund" {
+		t.Errorf("tool mutated through the returned intent: %q", got.Tool)
+	}
+}
+
 func TestTokenIsSingleUse(t *testing.T) {
 	s := confirm.NewStore(time.Minute)
 	in, tok, _ := s.Create("t", args(), "", "a", "saad")
