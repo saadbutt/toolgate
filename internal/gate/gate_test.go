@@ -13,6 +13,7 @@ import (
 	"github.com/saadbutt/toolgate/internal/billing"
 	"github.com/saadbutt/toolgate/internal/budget"
 	"github.com/saadbutt/toolgate/internal/confirm"
+	"github.com/saadbutt/toolgate/internal/exec"
 	"github.com/saadbutt/toolgate/internal/gate"
 	"github.com/saadbutt/toolgate/internal/policy"
 	"github.com/saadbutt/toolgate/internal/tools"
@@ -639,6 +640,50 @@ func TestZeroOutcomeDoesNotReadAsExecuted(t *testing.T) {
 	var out gate.Outcome
 	if out.Status != gate.Refused {
 		t.Fatalf("zero outcome reads as %v", out.Status)
+	}
+}
+
+// TestPanickingToolIsHeldUntilResolved runs a handler that panics through
+// the gate. The caller gets an error, not a crash, and the key does not run
+// again until someone says whether the effect happened.
+func TestPanickingToolIsHeldUntilResolved(t *testing.T) {
+	var calls atomic.Int64
+	reg := tools.NewRegistry()
+	if err := reg.Register(tools.Tool{
+		Name: "sync_ledger", Risk: tools.Write, Idempotent: true,
+		Handler: func(context.Context, tools.Args) (tools.Result, error) {
+			if calls.Add(1) == 1 {
+				panic("half-written batch")
+			}
+			return tools.Result{Text: "synced"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	g := gate.New(reg, policy.NewEngine(policy.DefaultRules()...),
+		budget.New(budget.Limits{MaxSteps: 10}), confirm.NewStore(time.Minute), audit.New())
+	p := agent(policy.Scope{Tools: policy.NewToolSet("sync_ledger")})
+	call := gate.Call{Tool: "sync_ledger", IdempotencyKey: "sync-1"}
+
+	if _, err := g.Submit(context.Background(), p, call); !errors.Is(err, exec.ErrOutcomeUnknown) {
+		t.Fatalf("panicking handler: got %v", err)
+	}
+	if un := g.Unresolved(); len(un) != 1 || un[0].Key != "sync-1" {
+		t.Fatalf("unresolved: %+v", un)
+	}
+	if _, err := g.Submit(context.Background(), p, call); !errors.Is(err, exec.ErrOutcomeUnknown) {
+		t.Fatalf("retry before resolving: got %v", err)
+	}
+
+	if err := g.Resolve("sync-1", false); err != nil {
+		t.Fatal(err)
+	}
+	out, err := g.Submit(context.Background(), p, call)
+	if err != nil || out.Status != gate.Executed {
+		t.Fatalf("retry after resolving: %v %v", out.Status, err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("handler ran %d times, want 2", calls.Load())
 	}
 }
 

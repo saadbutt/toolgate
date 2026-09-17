@@ -28,8 +28,12 @@ const (
 	Applied
 	// Recorded means effect and record are both durable.
 	Recorded
-	// Failed means the handler returned an error and nothing happened.
+	// Failed means the handler returned an error and nothing happened. The
+	// same key may run again.
 	Failed
+	// Unknown means the handler panicked, so nobody knows whether the effect
+	// happened. The key is held until someone checks and calls Resolve.
+	Unknown
 )
 
 func (s State) String() string {
@@ -42,6 +46,8 @@ func (s State) String() string {
 		return "recorded"
 	case Failed:
 		return "failed"
+	case Unknown:
+		return "outcome_unknown"
 	default:
 		return "unknown"
 	}
@@ -58,8 +64,17 @@ type Record struct {
 	Ended   time.Time
 }
 
-// ErrInFlight means the same key is currently executing elsewhere.
-var ErrInFlight = errors.New("exec: a call with this idempotency key is in flight")
+var (
+	// ErrInFlight means the same key is currently executing elsewhere.
+	ErrInFlight = errors.New("exec: a call with this idempotency key is in flight")
+	// ErrOutcomeUnknown means a handler panicked under this key. Running it
+	// again could repeat an effect that already happened, so it does not run
+	// until Resolve settles what happened.
+	ErrOutcomeUnknown = errors.New("exec: handler panicked, outcome unknown")
+	// ErrNothingToResolve means Resolve was called on a key whose outcome is
+	// not unknown.
+	ErrNothingToResolve = errors.New("exec: no unknown outcome under this key")
+)
 
 // Recorder persists the fact that a call happened. In this reference
 // implementation it is the audit log; in a deployment it would be a row in
@@ -102,6 +117,10 @@ func (e *Executor) SetClock(f func() time.Time) {
 // A repeat with the same key returns the first result without running the
 // handler again. That is the entire point: retries are normal, and the
 // caller cannot always tell whether the first attempt landed.
+//
+// A key whose handler returned an error runs again, because an error means
+// nothing happened. A key whose handler panicked does not, because nobody
+// knows whether anything happened.
 func (e *Executor) Do(ctx context.Context, key string, t tools.Tool, args tools.Args) (tools.Result, bool, error) {
 	e.mu.Lock()
 	if prev, ok := e.records[key]; ok {
@@ -111,9 +130,10 @@ func (e *Executor) Do(ctx context.Context, key string, t tools.Tool, args tools.
 			e.mu.Unlock()
 			return res, true, nil
 		case Failed:
-			errStr := prev.Err
+			// Nothing happened last time. This attempt replaces that record.
+		case Unknown:
 			e.mu.Unlock()
-			return tools.Result{}, true, errors.New(errStr)
+			return tools.Result{}, false, fmt.Errorf("%w: resolve %q before retrying", ErrOutcomeUnknown, key)
 		default:
 			e.mu.Unlock()
 			return tools.Result{}, false, ErrInFlight
@@ -123,10 +143,16 @@ func (e *Executor) Do(ctx context.Context, key string, t tools.Tool, args tools.
 	e.records[key] = rec
 	e.mu.Unlock()
 
-	res, err := t.Handler(ctx, args)
+	res, panicked, err := run(ctx, t, args)
 
 	e.mu.Lock()
 	rec.Ended = e.now()
+	if panicked {
+		rec.State = Unknown
+		rec.Err = err.Error()
+		e.mu.Unlock()
+		return tools.Result{}, false, err
+	}
 	if err != nil {
 		rec.State = Failed
 		rec.Err = err.Error()
@@ -153,6 +179,56 @@ func (e *Executor) Do(ctx context.Context, key string, t tools.Tool, args tools.
 	}
 	e.mu.Unlock()
 	return res, false, nil
+}
+
+// run calls the handler and turns a panic into an error, so that one broken
+// handler neither takes the process down nor leaves its key at Started, where
+// nothing lists it and nothing can clear it.
+func run(ctx context.Context, t tools.Tool, args tools.Args) (res tools.Result, panicked bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, panicked, err = tools.Result{}, true, fmt.Errorf("%w: %v", ErrOutcomeUnknown, r)
+		}
+	}()
+	res, err = t.Handler(ctx, args)
+	return res, false, err
+}
+
+// Unresolved lists calls whose handler panicked. Each may or may not have had
+// its effect, and each key stays blocked until Resolve says which.
+func (e *Executor) Unresolved() []Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Record
+	for _, r := range e.records {
+		if r.State == Unknown {
+			out = append(out, *r)
+		}
+	}
+	return out
+}
+
+// Resolve settles a call whose outcome is unknown, once someone has checked
+// the system its handler talks to.
+//
+// applied=true means the effect happened: the call becomes Applied, so a
+// repeat replays instead of running again, and Reconcile records it.
+// applied=false means it did not: the call becomes Failed and the key can run
+// again. Nothing here guesses, because either guess is wrong half the time
+// and one of the wrong halves moves money twice.
+func (e *Executor) Resolve(key string, applied bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	r, ok := e.records[key]
+	if !ok || r.State != Unknown {
+		return fmt.Errorf("%w: %q", ErrNothingToResolve, key)
+	}
+	if applied {
+		r.State = Applied
+	} else {
+		r.State = Failed
+	}
+	return nil
 }
 
 // Unrecorded lists calls whose effect happened but whose record did not. A

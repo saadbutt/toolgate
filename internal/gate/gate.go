@@ -142,6 +142,14 @@ func (g *Gate) Unrecorded() []exec.Record { return g.exec.Unrecorded() }
 // on a timer, and whenever storage comes back.
 func (g *Gate) Reconcile() (fixed int, err error) { return g.exec.Reconcile() }
 
+// Unresolved lists executed calls whose handler panicked, so whether the
+// effect happened is unknown. Their keys refuse to run again until resolved.
+func (g *Gate) Unresolved() []exec.Record { return g.exec.Unresolved() }
+
+// Resolve records what actually happened to a call Unresolved lists, after
+// checking the system its tool acts on. See exec.Executor.Resolve.
+func (g *Gate) Resolve(key string, applied bool) error { return g.exec.Resolve(key, applied) }
+
 var (
 	// ErrMissingIdempotencyKey means a mutating call arrived without a key.
 	ErrMissingIdempotencyKey = errors.New("gate: write and consequential calls need an idempotency key")

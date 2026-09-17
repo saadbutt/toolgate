@@ -92,6 +92,8 @@ An agent issues a refund. The money moves. The audit write fails. The process re
 
 Without explicit state the system either repeats the refund or forgets it. Here execution moves to `applied_unrecorded` before recording is attempted. If the audit log's sink refuses the write, the call stays there, `Gate.Unrecorded` lists it, and `Gate.Reconcile` writes the record once storage is back, without running the effect again. Nothing is rolled back, because the effect was real and pretending otherwise would be a lie with financial consequences.
 
+A handler that returns an error is saying nothing happened, so the same key can run again. A handler that panics is different: nobody knows whether the effect happened. The panic does not reach the caller, and the key is held rather than retried. `Gate.Unresolved` lists it, and `Gate.Resolve` records what someone found when they checked: applied, so repeats replay and `Reconcile` writes the record, or not applied, so the key can run again.
+
 This state lives in memory. After a restart the executor no longer knows which keys ran, so neither idempotency nor reconciliation survives one.
 
 ### The audit log is tamper-evident
@@ -159,6 +161,8 @@ TestMalformedCallsAreNotFree
 TestTruncatedLogIsDetected
 TestEffectWhoseRecordFailedIsReconciled
 TestReconcileWritesEachRecordOnce
+TestFailedCallCanBeRetriedUnderSameKey
+TestPanickingHandlerDoesNotWedgeItsKey
 ```
 
 ## Honest limits
@@ -177,7 +181,7 @@ TestReconcileWritesEachRecordOnce
 
 **Idempotency is declared, not verified.** `Tool.Idempotent` is checked once, at registration. The gate's executor stops a repeated key from running twice within one process, but the demo billing system's `issue_refund` appends on every call and relies on that entirely.
 
-**There are no timeouts.** The context is passed through to the handler, and nothing in the gate sets a deadline or checks for cancellation.
+**There are no timeouts.** The context is passed through to the handler, and nothing in the gate sets a deadline or checks for cancellation. A handler that never returns holds its key in flight for the life of the process.
 
 ## Why Go
 

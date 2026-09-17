@@ -116,6 +116,10 @@ type Result struct {
 }
 
 // Handler performs the actual work of a tool.
+//
+// Return an error only when the effect did not happen: the executor lets the
+// same idempotency key run again after an error. A handler that panics is
+// treated as having an unknown outcome, and its key is held until resolved.
 type Handler func(ctx context.Context, args Args) (Result, error)
 
 // Tool is one capability, with its contract attached.
