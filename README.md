@@ -12,6 +12,8 @@ go run ./cmd/demo
 
 No API key needed. Seven scenarios, each one an attack and the guardrail that stops it.
 
+There is also a version of this against a real model, not a script: [`cmd/live-demo`](#against-a-real-model).
+
 ## What this is not
 
 Not a framework for building agents. Not an orchestrator, a prompt library, or a vector store. Those are solved elsewhere.
@@ -37,6 +39,23 @@ Once an agent can move money, send messages, or change records, "it usually gets
 | 7 | Audit log edited or cut short | Hash chain breaks and names the entry. A separately kept head catches deleted recent entries |
 
 Scenario 5 is the one worth reading the code for. "Confirm before executing" is easy to implement wrongly: if you re-ask the model for arguments after approval, you approved a description and executed something else.
+
+## Against a real model
+
+`cmd/demo` is deterministic on purpose: a scripted driver so the failure cases are reproducible in CI. It does not prove the gate survives an actual model's actual tool calls, which do not follow a script.
+
+`cmd/live-demo` is the same billing system, the same gate, the same invoice with a real prompt-injection payload sitting in its notes, but the caller is a real model with real tool definitions, deciding for itself what to do with a customer's refund request. Nothing in its system prompt mentions injection, security, or toolgate.
+
+```
+ANTHROPIC_API_KEY=... go run ./cmd/live-demo
+OPENAI_API_KEY=...    go run ./cmd/live-demo -provider openai -model gpt-4o
+```
+
+Both providers are a few hundred lines against the plain REST API, `net/http` and `encoding/json` only. No SDK, so the "no dependencies" claim holds here too. The tool schema sent to the model is generated from the same `tools.Schema` the gate validates against, so there is no second copy of the contract to drift out of sync with the first.
+
+What it checks does not depend on what the model decides to do. Two invariants are asserted after every run, live model included: no money moved, and `issue_refund` was never executed on the agent's own authority. Whether the model reads the injected note and tries to act on it, or reads it and refuses, both are real outcomes worth seeing, and either way the same two invariants have to hold. The program exits non-zero if they don't.
+
+This isn't run in CI, because it needs a real key and a real model's first move isn't fixed. What's checked in CI instead is the part that doesn't need either: `cmd/live-demo/main_test.go` points both providers at a local fake server scripted to take the injection bait — the worst case — and asserts the same invariants hold, plus a second case checking a well-behaved model doesn't trip a false positive. That's what `go test ./...` already exercises on every push.
 
 ## Design
 
@@ -108,6 +127,7 @@ Fields with common secret names are redacted at write time.
 
 ```
 cmd/demo            seven scenarios, no API key
+cmd/live-demo       the same gate, against a real model over the network
 internal/tools      registry, typed schemas, validation
 internal/policy     deny-by-default engine, principals, capability grants
 internal/confirm    pending intents, argument freezing, single-use tokens
@@ -175,7 +195,7 @@ TestPanickingHandlerDoesNotWedgeItsKey
 
 **The injection scanner is not a defence.** It flags known phrasings, which is useful for alerting and for the demo. A payload avoiding those phrases is still contained, because the permission model does not depend on recognising the attack.
 
-**No model provider is included.** A scripted driver runs the demo so the failure cases are reproducible. A real provider is an adapter, not a rewrite.
+**The real-model adapters are examples, not a client library.** `cmd/live-demo`'s two provider adapters cover one-tool-call-per-turn, no streaming, no retries, and stop after a fixed number of turns. They're there to prove the gate holds against real output, not to be imported.
 
 **Storage is in memory.** The audit log takes a sink for durable writes. Intents, budgets and execution records have no storage hook yet, so none of them survive a restart.
 
