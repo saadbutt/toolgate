@@ -315,7 +315,7 @@ func runawayLoop(r *rig) error {
 		})
 		var ve *tools.ValidationError
 		switch {
-		case errors.Is(err, budget.Exceeded):
+		case errors.Is(err, budget.ErrBudgetExceeded):
 			stopped++
 			if stopped == 1 {
 				gateSays("attempt %d: %v", i+1, err)

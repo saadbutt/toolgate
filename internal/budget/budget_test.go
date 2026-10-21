@@ -18,7 +18,7 @@ func TestStepCeilingStops(t *testing.T) {
 			t.Fatalf("step %d refused early: %v", i, err)
 		}
 	}
-	if err := l.Charge("a", 0, 0); !errors.Is(err, budget.Exceeded) {
+	if err := l.Charge("a", 0, 0); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("fourth step allowed: %v", err)
 	}
 }
@@ -28,7 +28,7 @@ func TestMoneyCeilingStops(t *testing.T) {
 	if err := l.Charge("a", 0, 9_000); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Charge("a", 0, 2_000); !errors.Is(err, budget.Exceeded) {
+	if err := l.Charge("a", 0, 2_000); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("overspend allowed: %v", err)
 	}
 }
@@ -102,7 +102,7 @@ func TestChargeMoneyDoesNotCountAStep(t *testing.T) {
 	if steps, _, money := l.Usage("a"); steps != 1 || money != 9_000 {
 		t.Fatalf("usage is %d steps, %d money", steps, money)
 	}
-	if err := l.ChargeMoney("a", 2_000); !errors.Is(err, budget.Exceeded) {
+	if err := l.ChargeMoney("a", 2_000); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("overspend allowed: %v", err)
 	}
 }
@@ -115,10 +115,10 @@ func TestChargeCannotWrapTheLedger(t *testing.T) {
 	if err := l.Charge("a", 100, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.ChargeMoney("a", math.MaxInt64); !errors.Is(err, budget.Exceeded) {
+	if err := l.ChargeMoney("a", math.MaxInt64); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("money charge near MaxInt64 allowed: %v", err)
 	}
-	if err := l.Charge("a", math.MaxInt64, 0); !errors.Is(err, budget.Exceeded) {
+	if err := l.Charge("a", math.MaxInt64, 0); !errors.Is(err, budget.ErrBudgetExceeded) {
 		t.Fatalf("token charge near MaxInt64 allowed: %v", err)
 	}
 	if _, tokens, money := l.Usage("a"); tokens != 100 || money != 100 {

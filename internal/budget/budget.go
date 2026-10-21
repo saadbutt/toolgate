@@ -36,11 +36,11 @@ func (e *ErrExceeded) Error() string {
 	return fmt.Sprintf("budget: %s ceiling reached (%d of %d)", e.Dimension, e.Used, e.Limit)
 }
 
-// Is lets callers match with errors.Is(err, budget.Exceeded).
-func (e *ErrExceeded) Is(target error) bool { return target == Exceeded }
+// Is lets callers match with errors.Is(err, budget.ErrBudgetExceeded).
+func (e *ErrExceeded) Is(target error) bool { return target == ErrBudgetExceeded }
 
-// Exceeded is the sentinel for any ceiling breach.
-var Exceeded = errors.New("budget exceeded")
+// ErrBudgetExceeded is the sentinel for any ceiling breach.
+var ErrBudgetExceeded = errors.New("budget: ceiling exceeded")
 
 // ErrNegativeCharge means a charge tried to give consumption back.
 var ErrNegativeCharge = errors.New("budget: charges cannot be negative")

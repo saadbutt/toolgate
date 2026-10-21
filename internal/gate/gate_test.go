@@ -361,7 +361,7 @@ func TestBudgetCeilingStopsRunawayLoop(t *testing.T) {
 			Tool: "lookup_invoice",
 			Args: tools.Args{"invoice_id": "INV-1001"},
 		})
-		if errors.Is(err, budget.Exceeded) {
+		if errors.Is(err, budget.ErrBudgetExceeded) {
 			refused++
 		}
 	}
@@ -389,7 +389,7 @@ func TestMalformedCallsAreNotFree(t *testing.T) {
 
 			var exceeded int
 			for i := 0; i < 1000; i++ {
-				if _, err := h.g.Submit(context.Background(), p, tc.call); errors.Is(err, budget.Exceeded) {
+				if _, err := h.g.Submit(context.Background(), p, tc.call); errors.Is(err, budget.ErrBudgetExceeded) {
 					exceeded++
 				}
 			}
