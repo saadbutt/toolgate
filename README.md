@@ -16,6 +16,29 @@ No API key needed. Seven scenarios, each one an attack and the guardrail that st
 
 There is also a version of this against a real model, not a script: [`cmd/live-demo`](#against-a-real-model).
 
+## Tech stack
+
+- **Language:** Go, standard library only (no runtime dependencies), plus a
+  TypeScript port of the confirmation core in [`typescript/`](typescript/)
+- **Real-model integration:** Anthropic and OpenAI, over their plain REST
+  APIs via `net/http` and `encoding/json` — no SDK
+- **Testing:** `go test -race`, Node's built-in test runner for the
+  TypeScript port
+- **CI:** GitHub Actions — gofmt, vet, full suite, race detector, arm64
+  cross-compile, TypeScript tests and typecheck, on every push
+
+## Measurable results
+
+- **0 vulnerabilities** — `govulncheck ./...` reports a clean scan
+- **109 Go tests**, most named as the attack they rule out rather than as
+  functions (`TestArgumentTamperingBetweenConfirmAndExecuteIsRejected`, not
+  `TestConfirm3`) — a representative sample is in [Tests](#tests)
+- **7/7 attack scenarios** stopped in the deterministic demo, verified
+  against a real model's own unscripted tool calls in
+  [`cmd/live-demo`](#against-a-real-model)
+- **28 TypeScript tests**, pinned against the same fixture hashes as the Go
+  implementation so the two encoders can't silently drift apart
+
 ## What this is not
 
 Not a framework for building agents. Not an orchestrator, a prompt library, or a vector store. Those are solved elsewhere.
@@ -42,6 +65,32 @@ Once an agent can move money, send messages, or change records, "it usually gets
 
 Scenario 5 is the one worth reading the code for. "Confirm before executing" is easy to implement wrongly: if you re-ask the model for arguments after approval, you approved a description and executed something else.
 
+### Demo output
+
+No GUI here, so this is `go run ./cmd/demo`'s actual output for scenario 1 —
+unedited, not a mockup:
+
+```
+====================================================================
+1. Agent tries to move money directly
+====================================================================
+
+   [model] calling issue_refund(INV-1001, $42.00, "duplicate charge")
+   [gate]  decision: needs_confirmation (rule: consequential_needs_human)
+   [gate]  nothing executed. created intent e5591c60 awaiting saad
+
+   what a human would see: Issue a refund to the customer | invoice_id: INV-1001 | amount_cents: $42.00 | reason: duplicate charge
+   money moved so far: $0.00
+
+   saad approves...
+   [gate]  executed under rule human_confirmed
+   money moved now: $42.00
+```
+
+The other six scenarios print the same way — what the model called, what the
+gate decided and why, and what actually moved. Run it yourself for the full
+transcript, including scenario 3's live prompt-injection payload.
+
 ## Against a real model
 
 `cmd/demo` is deterministic on purpose: a scripted driver so the failure cases are reproducible in CI. It does not prove the gate survives an actual model's actual tool calls, which do not follow a script.
@@ -58,6 +107,42 @@ Both providers are a few hundred lines against the plain REST API, `net/http` an
 What it checks does not depend on what the model decides to do. Two invariants are asserted after every run, live model included: no money moved, and `issue_refund` was never executed on the agent's own authority. Whether the model reads the injected note and tries to act on it, or reads it and refuses, both are real outcomes worth seeing, and either way the same two invariants have to hold. The program exits non-zero if they don't.
 
 This isn't run in CI, because it needs a real key and a real model's first move isn't fixed. What's checked in CI instead is the part that doesn't need either: `cmd/live-demo/main_test.go` points both providers at a local fake server scripted to take the injection bait — the worst case — and asserts the same invariants hold, plus a second case checking a well-behaved model doesn't trip a false positive. That's what `go test ./...` already exercises on every push.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Agent["Agent / Model"] -->|"Call: tool, args"| Submit["Gate.Submit"]
+    Human["Human"] -->|"Approve: intentID, token"| Confirm2["Gate.ConfirmAndRun"]
+
+    Submit --> Step1["Budget: charge a step"]
+    Step1 --> Validate["Tools: look up + validate schema"]
+    Validate --> Money["Budget: charge money"]
+    Money --> Decide["Policy: evaluate"]
+
+    Decide -->|Deny| Refuse["Refuse"]
+    Decide -->|NeedsConfirmation| Pending["Confirm: create pending intent\n(frozen args, single-use token)"]
+    Decide -->|Allow| Exec["Exec: run handler"]
+
+    Pending -.->|"intent + token"| Confirm2
+    Confirm2 --> Step2["Budget: charge a step"]
+    Step2 --> Decide2["Policy: evaluate again,\nfor the approver"]
+    Decide2 --> Exec
+
+    Exec --> Host["Host handler\n(e.g. billing.issue)"]
+    Exec --> Audit["Audit: hash-chained record"]
+    Refuse --> Audit
+    Pending --> Audit
+
+    Host -.->|"result, marked untrusted"| Agent
+```
+
+`Submit` and `ConfirmAndRun` are the gate's only two entry points, and every
+collaborator behind them (`tools`, `policy`, `budget`, `confirm`, `audit`,
+`exec`) is unexported — a host cannot reach past the gate to call a handler
+directly, and a model's call cannot skip a step. The diagram is the same one
+[Design](#design) walks through in prose, and the same one `cmd/demo`'s seven
+scenarios each take one branch of.
 
 ## Design
 
