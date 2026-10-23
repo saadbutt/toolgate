@@ -1,3 +1,3 @@
 module github.com/saadbutt/toolgate
 
-go 1.22
+go 1.26.10
