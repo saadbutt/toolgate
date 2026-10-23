@@ -1,5 +1,7 @@
 # toolgate
 
+[![CI](https://github.com/saadbutt/toolgate/actions/workflows/ci.yml/badge.svg)](https://github.com/saadbutt/toolgate/actions/workflows/ci.yml)
+
 A gate between an AI agent and the systems it can actually change.
 
 The model decides what it wants to do. The gate decides what is allowed to happen.
